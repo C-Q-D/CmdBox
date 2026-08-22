@@ -52,8 +52,8 @@
 
 ### 执行与 Git 策略
 
-- 执行模式：连续执行；每个原子保持独立实现、验证、质疑和本地提交。
-- 提交目标：仅本地。当前仓库没有配置远端，用户没有要求创建远端或推送。
+- 执行模式：连续执行；每个原子保持独立实现、验证、质疑和提交。
+- 提交目标：GitHub 公开仓库 `https://github.com/C-Q-D/CmdBox`；每个原子提交完成后立即推送当前远端跟踪分支。
 - 规划质疑：L2/L3 计划已完成一轮隔离审查；四项发现已全部吸收进本修订版本。
 - 整体回归：`cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`、`cargo test --manifest-path src-tauri/Cargo.toml`、项目现有 `pnpm check`。
 
