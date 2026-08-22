@@ -110,7 +110,7 @@
 
 ## CMD01-IPC-02 TypeScript 通过类型化网关消费 IPC
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：React 可调用固定任务并消费专属有序事件。
 - 唯一目标：提供一个可测试、无任意命令能力的 TypeScript IPC Gateway。
 - 当前行为与目标行为：前端未依赖 Tauri JS API；完成后只有 Gateway 知道 Command 名和 `Channel` 构造。
@@ -133,6 +133,10 @@
 - 风险等级：L2
 - DDD 门禁：提交前审查 TS/Rust 字段一致性与能力最小化，必须 `PASS`。
 - 计划提交信息：`feat(frontend): [CMD01-IPC-02] 增加固定任务 IPC 网关`
+
+### 执行记录
+
+- 实际验证：Gateway 定向测试 4 项、全部前端测试 8 项、TypeScript 类型检查与 Vite 构建通过；提交前 L2 DDD 第二轮复审为 `PASS`。
 
 ## CMD01-UI-01 React 工作区呈现真实执行与取消状态
 
