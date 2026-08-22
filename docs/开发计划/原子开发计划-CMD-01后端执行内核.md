@@ -113,7 +113,7 @@
 
 ## EXEC-BE-03 创建并终止受 Job Object 管理的挂起进程
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：固定 PowerShell 进程及其子孙属于一个 Execution Job，自然结束可等待，取消或 Core 退出不会遗留受管树。
 - 唯一目标：以无分配竞态的顺序创建、恢复、等待和终止一个 Windows Job 进程树。
 - 当前行为与目标行为：当前没有进程能力；完成后进程以 `CREATE_SUSPENDED | CREATE_NO_WINDOW` 创建，加入设置 `KILL_ON_JOB_CLOSE` 的独立 Job 后才 `ResumeThread`。
@@ -133,6 +133,10 @@
 - 风险等级：L3，涉及并发、进程树终止和 Core 退出安全。
 - DDD 门禁：规划质疑已覆盖；提交前审查完整 diff、句柄所有权、失败清理和真实 Windows 证据，必须为 PASS。
 - 计划提交信息：`feat(core): [EXEC-BE-03] 使用 Job Object 管理进程树`
+
+### 执行记录
+
+- 实际验证：受管进程窄测试 3 项通过；启用 `process-test-helper` 的独立 Core 强退集成测试 1 项通过；`cargo check --manifest-path src-tauri/Cargo.toml` 通过；`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features process-test-helper -- -D warnings` 通过；提交前 DDD 复核为 `PASS`。
 
 ## EXEC-BE-04 非阻塞 Drain 并排序 stdout/stderr 输出
 

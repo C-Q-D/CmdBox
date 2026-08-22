@@ -5,3 +5,6 @@
 
 /// Windows PowerShell 5.1 的确定性 Runner。
 pub mod runner;
+
+/// 受 Job Object 管理的一次性进程。
+pub mod managed_process;

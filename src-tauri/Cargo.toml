@@ -5,6 +5,10 @@ description = "CmdBox Windows desktop application"
 authors = ["CmdBox contributors"]
 edition = "2021"
 
+[features]
+# 只在真实 Windows 进程树测试中构建独立 Core helper，不进入普通应用产物。
+process-test-helper = []
+
 [lib]
 # Windows 上二进制与库不能同名，因此保留 `_lib` 后缀。
 name = "cmdbox_lib"
@@ -19,4 +23,15 @@ tauri = { version = "2", features = [] }
 uuid = { version = "1.24.0", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+] }
+
+[[bin]]
+name = "cmdbox-job-test-helper"
+path = "src/bin/cmdbox-job-test-helper.rs"
+required-features = ["process-test-helper"]
