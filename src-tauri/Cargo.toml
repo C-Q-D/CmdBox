@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "CmdBox Windows desktop application"
 authors = ["CmdBox contributors"]
 edition = "2021"
+default-run = "cmdbox"
 
 [features]
 # 只在真实 Windows 进程树测试中构建独立 Core helper，不进入普通应用产物。
