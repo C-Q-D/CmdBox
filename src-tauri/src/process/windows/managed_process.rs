@@ -2,7 +2,7 @@
 //!
 //! 本文件直接使用 Win32 `CreateProcessW`，先挂起创建 PowerShell，再加入设置了
 //! `KILL_ON_JOB_CLOSE` 的独立 Job，最后恢复主线程，从根源上避免简单 spawn 后分配 Job 的
-//! 子进程逃逸竞态。本原子尚不重定向 stdout/stderr；输出管道由下一原子接入。
+//! 子进程逃逸竞态。stdout/stderr 管道和取消句柄可在 Resume 前交给 Session 完成预绑定。
 
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -13,28 +13,33 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{FromRawHandle, RawHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
+use std::sync::Arc;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_FAILED, WAIT_OBJECT_0,
+    CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    WAIT_FAILED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectAssociateCompletionPortInformation,
+    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::SystemServices::JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, ResumeThread, TerminateProcess, WaitForSingleObject,
     CREATE_NO_WINDOW, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
     STARTUPINFOW,
 };
+use windows_sys::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus};
 
 use crate::execution::artifact::{ArtifactError, PowerShellArtifact};
 use crate::process::windows::runner::WindowsPowerShellRunner;
 
 /// CmdBox 主动取消 Job 时使用的进程退出码。
-const CMDBOX_CANCEL_EXIT_CODE: u32 = 0xC000_013A;
+pub(crate) const CMDBOX_CANCEL_EXIT_CODE: u32 = 0xC000_013A;
 
 /// `OpenProcess` 仅等待进程退出所需的标准访问权限。
 #[cfg(test)]
@@ -47,6 +52,8 @@ pub enum ManagedProcessOperation {
     CreateJob,
     /// 设置 Job 的 KILL_ON_JOB_CLOSE 限制。
     ConfigureJob,
+    /// 创建并关联 Job 完成端口。
+    ConfigureCompletionPort,
     /// 以挂起状态创建 PowerShell 进程。
     CreateProcess,
     /// 把挂起进程分配到 Job。
@@ -59,6 +66,8 @@ pub enum ManagedProcessOperation {
     ReadExitCode,
     /// 终止整个 Job 进程树。
     TerminateJob,
+    /// 等待 Job 报告 Active Process Zero。
+    WaitJobEmpty,
 }
 
 /// 输出受管进程操作的稳定开发者标识。
@@ -67,12 +76,14 @@ impl Display for ManagedProcessOperation {
         let value = match self {
             Self::CreateJob => "createJob",
             Self::ConfigureJob => "configureJob",
+            Self::ConfigureCompletionPort => "configureCompletionPort",
             Self::CreateProcess => "createProcess",
             Self::AssignProcess => "assignProcess",
             Self::ResumeProcess => "resumeProcess",
             Self::WaitProcess => "waitProcess",
             Self::ReadExitCode => "readExitCode",
             Self::TerminateJob => "terminateJob",
+            Self::WaitJobEmpty => "waitJobEmpty",
         };
         formatter.write_str(value)
     }
@@ -129,6 +140,12 @@ struct OwnedHandle {
     /// 非空且尚未关闭的原始 Handle。
     raw: HANDLE,
 }
+
+// SAFETY: Windows 内核 Handle 可以跨线程传递并由多个线程并发用于等待或 Job 操作；
+// `OwnedHandle` 仍保持唯一关闭所有权，且只公开不转移所有权的原子 Win32 调用。
+unsafe impl Send for OwnedHandle {}
+// SAFETY: 同上；并发借用不会改变句柄值或产生重复 CloseHandle。
+unsafe impl Sync for OwnedHandle {}
 
 impl OwnedHandle {
     /// 接管一个已经由 Win32 API 成功创建的非空 Handle。
@@ -288,6 +305,8 @@ impl StandardPipes {
 struct KillOnCloseJob {
     /// Job Object 的唯一所有权句柄。
     handle: OwnedHandle,
+    /// 接收当前 Job ACTIVE_PROCESS_ZERO 通知的独立完成端口。
+    completion_port: OwnedHandle,
 }
 
 impl KillOnCloseJob {
@@ -316,7 +335,20 @@ impl KillOnCloseJob {
             return Err(last_win32_error(ManagedProcessOperation::ConfigureJob));
         }
 
-        Ok(Self { handle })
+        // SAFETY: INVALID_HANDLE_VALUE 表示只创建新的完成端口；并发线程数 1 足够当前 Job
+        // 的单一 Supervisor 消费通知。
+        let completion_port =
+            unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1) };
+        if completion_port.is_null() {
+            return Err(last_win32_error(
+                ManagedProcessOperation::ConfigureCompletionPort,
+            ));
+        }
+
+        Ok(Self {
+            handle,
+            completion_port: OwnedHandle::new(completion_port),
+        })
     }
 
     /// 把仍处于挂起状态的根进程加入当前 Job。
@@ -324,6 +356,25 @@ impl KillOnCloseJob {
         // SAFETY: 两个句柄均在调用期间有效；根进程尚未 Resume，不会先创建子进程。
         if unsafe { AssignProcessToJobObject(self.handle.raw(), process) } == 0 {
             return Err(last_win32_error(ManagedProcessOperation::AssignProcess));
+        }
+        let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+            CompletionKey: self.handle.raw(),
+            CompletionPort: self.completion_port.raw(),
+        };
+        // SAFETY: 根进程已经加入 Job 但仍处于挂起状态，因此从关联完成端口到 Resume 之间
+        // 不会产生子进程竞态；结构体、Job 和完成端口句柄在调用期间均有效。
+        if unsafe {
+            SetInformationJobObject(
+                self.handle.raw(),
+                JobObjectAssociateCompletionPortInformation,
+                (&association as *const JOBOBJECT_ASSOCIATE_COMPLETION_PORT).cast(),
+                size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
+            )
+        } == 0
+        {
+            return Err(last_win32_error(
+                ManagedProcessOperation::ConfigureCompletionPort,
+            ));
         }
         Ok(())
     }
@@ -336,6 +387,95 @@ impl KillOnCloseJob {
         }
         Ok(())
     }
+
+    /// 事件驱动等待 Job 的 Active Process 数降为零，明确确认整个受管树已经结束。
+    fn wait_until_empty(&self) -> Result<(), ManagedProcessError> {
+        loop {
+            let mut message = 0_u32;
+            let mut completion_key = 0_usize;
+            let mut overlapped = null_mut();
+            // SAFETY: 完成端口句柄和三个输出指针在阻塞调用期间有效；INFINITE 表示由 Job
+            // 通知唤醒而非轮询。每个 Job 只有当前 Supervisor 消费该端口。
+            let dequeued = unsafe {
+                GetQueuedCompletionStatus(
+                    self.completion_port.raw(),
+                    &mut message,
+                    &mut completion_key,
+                    &mut overlapped,
+                    INFINITE,
+                )
+            };
+            if dequeued == 0 {
+                return Err(last_win32_error(ManagedProcessOperation::WaitJobEmpty));
+            }
+            if message == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO {
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// 可在会话管理线程中独立请求整树终止的 Job 句柄所有权。
+#[derive(Debug, Clone)]
+pub struct ManagedProcessCancellation {
+    /// 与受管进程共享同一个 KILL_ON_JOB_CLOSE Job。
+    job: Arc<KillOnCloseJob>,
+}
+
+impl ManagedProcessCancellation {
+    /// 请求终止当前 Execution 的整个 Job；返回只代表系统接受终止操作。
+    pub fn terminate_job(&self) -> Result<(), ManagedProcessError> {
+        self.job.terminate()
+    }
+}
+
+/// 已经挂起创建并加入 Job、但尚未恢复主线程的受管进程。
+#[derive(Debug)]
+pub struct PreparedManagedProcess {
+    /// Resume 前失败时负责终止并回收挂起根进程。
+    pending: PendingStartupProcess,
+    /// 与取消入口共享的 KILL_ON_JOB_CLOSE Job。
+    job: Arc<KillOnCloseJob>,
+    /// 保持临时脚本直到受管进程生命周期结束。
+    artifact: PowerShellArtifact,
+    /// Resume 前即可交给输出 Reader 的 stdout/stderr 读端。
+    output: Option<CapturedOutput>,
+}
+
+impl PreparedManagedProcess {
+    /// 返回挂起根进程 PID，仅供会话 Started 事件观测。
+    pub fn process_id(&self) -> u32 {
+        self.pending.process_id()
+    }
+
+    /// 返回独立取消入口，允许 Manager 在 Resume 前登记 Active Execution。
+    pub fn cancellation(&self) -> ManagedProcessCancellation {
+        ManagedProcessCancellation {
+            job: Arc::clone(&self.job),
+        }
+    }
+
+    /// 取出 stdout/stderr 读端并预先绑定 Reader；只能转交一次。
+    pub fn take_output(&mut self) -> Option<CapturedOutput> {
+        self.output.take()
+    }
+
+    /// 恢复已经加入 Job 的主线程，并转成可等待的运行中进程。
+    pub fn resume(self) -> Result<ManagedProcess, ManagedProcessError> {
+        // SAFETY: 主线程 Handle 有效且进程仍保持 CreateProcessW 建立的首次挂起计数。
+        let previous_suspend_count = unsafe { ResumeThread(self.pending.thread_handle()) };
+        if previous_suspend_count == u32::MAX {
+            return Err(last_win32_error(ManagedProcessOperation::ResumeProcess));
+        }
+        let (process, process_id) = self.pending.complete();
+
+        Ok(ManagedProcess {
+            process,
+            job: self.job,
+            process_id,
+            _artifact: self.artifact,
+        })
+    }
 }
 
 /// 一个已经恢复运行且属于独立 Job Object 的根进程。
@@ -344,13 +484,11 @@ pub struct ManagedProcess {
     /// 根进程 Handle，用于等待和读取 Exit Code。
     process: OwnedHandle,
     /// 持有整个受管进程树的 Job；Drop 时触发 KILL_ON_JOB_CLOSE。
-    job: KillOnCloseJob,
+    job: Arc<KillOnCloseJob>,
     /// 根进程的系统 PID，只用于观测和测试，不提供按 PID 终止入口。
     process_id: u32,
     /// 保持临时脚本到进程对象结束，防止运行期间被提前清理。
     _artifact: PowerShellArtifact,
-    /// 尚未交给输出协调器的 stdout/stderr 读端。
-    output: Option<CapturedOutput>,
 }
 
 impl ManagedProcess {
@@ -360,7 +498,22 @@ impl ManagedProcess {
         artifact: PowerShellArtifact,
         working_directory: &Path,
     ) -> Result<Self, ManagedProcessError> {
-        Self::spawn_with_job_assignment(
+        Self::prepare_with_job_assignment(
+            runner,
+            artifact,
+            working_directory,
+            |job, process, _process_id| job.assign(process),
+        )?
+        .resume()
+    }
+
+    /// 复验 Artifact，挂起创建并加入 Job，但把 Resume 留给会话层完成预绑定后调用。
+    pub fn prepare(
+        runner: &WindowsPowerShellRunner,
+        artifact: PowerShellArtifact,
+        working_directory: &Path,
+    ) -> Result<PreparedManagedProcess, ManagedProcessError> {
+        Self::prepare_with_job_assignment(
             runner,
             artifact,
             working_directory,
@@ -369,12 +522,12 @@ impl ManagedProcess {
     }
 
     /// 使用给定 Job 分配动作完成受管启动；测试可注入 Assign 失败以证明守卫会清理 PID。
-    fn spawn_with_job_assignment<F>(
+    fn prepare_with_job_assignment<F>(
         runner: &WindowsPowerShellRunner,
         artifact: PowerShellArtifact,
         working_directory: &Path,
         assign: F,
-    ) -> Result<Self, ManagedProcessError>
+    ) -> Result<PreparedManagedProcess, ManagedProcessError>
     where
         F: FnOnce(&KillOnCloseJob, HANDLE, u32) -> Result<(), ManagedProcessError>,
     {
@@ -388,7 +541,7 @@ impl ManagedProcess {
         artifact
             .verify_before_spawn()
             .map_err(ManagedProcessError::Artifact)?;
-        let job = KillOnCloseJob::create()?;
+        let job = Arc::new(KillOnCloseJob::create()?);
         let mut command_line = build_command_line(
             runner.executable(),
             &runner.script_arguments(artifact.script_path()),
@@ -426,20 +579,12 @@ impl ManagedProcess {
 
         let pending = PendingStartupProcess::new(process_info);
         let output = pipes.into_captured_output();
-        assign(&job, pending.process_handle(), pending.process_id())?;
+        assign(job.as_ref(), pending.process_handle(), pending.process_id())?;
 
-        // SAFETY: 主线程 Handle 有效且进程仍保持 CreateProcessW 建立的首次挂起计数。
-        let previous_suspend_count = unsafe { ResumeThread(pending.thread_handle()) };
-        if previous_suspend_count == u32::MAX {
-            return Err(last_win32_error(ManagedProcessOperation::ResumeProcess));
-        }
-        let (process, process_id) = pending.complete();
-
-        Ok(Self {
-            process,
+        Ok(PreparedManagedProcess {
+            pending,
             job,
-            process_id,
-            _artifact: artifact,
+            artifact,
             output: Some(output),
         })
     }
@@ -447,11 +592,6 @@ impl ManagedProcess {
     /// 返回受管根进程 PID，仅供状态观测；取消仍必须按 Execution Job 进行。
     pub fn process_id(&self) -> u32 {
         self.process_id
-    }
-
-    /// 取出 stdout/stderr 读端；每个受管进程只允许转交一次。
-    pub fn take_output(&mut self) -> Option<CapturedOutput> {
-        self.output.take()
     }
 
     /// 阻塞等待根进程结束并返回原始 Exit Code；后续会话层会把它放入专用等待任务。
@@ -479,6 +619,11 @@ impl ManagedProcess {
     /// 请求 Windows 终止整个 Execution Job；调用方必须继续 wait 后才能发布 Cancelled。
     pub fn terminate_job(&self) -> Result<(), ManagedProcessError> {
         self.job.terminate()
+    }
+
+    /// 等待 Job 完成端口明确报告 Active Process Zero。
+    pub fn wait_job_empty(&self) -> Result<(), ManagedProcessError> {
+        self.job.wait_until_empty()
     }
 }
 
@@ -686,7 +831,7 @@ mod tests {
         let working_directory = safe_working_directory();
         let captured_pid = AtomicU32::new(0);
 
-        let result = ManagedProcess::spawn_with_job_assignment(
+        let result = ManagedProcess::prepare_with_job_assignment(
             &runner,
             artifact,
             &working_directory,

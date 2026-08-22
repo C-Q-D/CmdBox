@@ -5,7 +5,7 @@
 - 计划 ID：ATOMIC-EXEC-BACKEND-001
 - 类型：atomic-development
 - 修订版本：1
-- 状态：active
+- 状态：completed
 - 父级 ID：不适用（支撑产品交付单元 `CMD-01`，但本计划完成不代表 `CMD-01` 完成）
 - 创建基线：`30b0d4a`
 
@@ -167,7 +167,7 @@
 
 ## EXEC-BE-05 组合固定脚本 Execution Session
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：后端调用方一次启动固定脚本并可靠接收完整生命周期，可按 Execution ID 取消或查询运行状态。
 - 唯一目标：把 Runner、Artifact、Job Process 和 Output 组合成一个可独立集成测试的后端 Execution Session。
 - 当前行为与目标行为：已有组件尚未形成调用入口；完成后 `start_fixed_powershell()` 原子返回 execution ID 与已在 Resume 前绑定的专属事件接收端，Manager 提供 cancel 和 active snapshot。
@@ -187,6 +187,10 @@
 - 风险等级：L3，涉及公共后端 API、并发状态与取消语义。
 - DDD 门禁：规划质疑已覆盖；提交前审查完整 diff、生命周期测试和清理证据，必须为 PASS。
 - 计划提交信息：`feat(core): [EXEC-BE-05] 组合固定脚本执行会话`
+
+### 执行记录
+
+- 实际验证：Execution Session 真实 Windows 测试 6 项通过，覆盖极短自然结束、stdout/stderr 中文、非零 Exit Code、Artifact 清理、根进程结束后的 Job 子孙清理、重复取消、取消/自然退出竞态、Active 查询和慢消费者有界压力；全部 Rust 测试 19 项通过；启用 `process-test-helper` 的独立 Core 强退进程树测试通过；`cargo fmt --check`、严格 `cargo clippy` 和项目 `pnpm check` 通过；完成端口 `ACTIVE_PROCESS_ZERO` 整树退出门禁经提交前 DDD 最终复核为 `PASS`。
 
 # 计划变更记录
 

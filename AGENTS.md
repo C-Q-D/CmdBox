@@ -32,7 +32,7 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 - 日常小步验证：`pnpm check:fast`；提交前完整验证：`pnpm check`；完整 `pnpm tauri build` 只用于里程碑或发布。
 - `src/` 修改走 Vite HMR，`src-tauri/src/` 修改走 Tauri Watch + Cargo Incremental；不要为普通源码修改手工重建 Bundle。
 - 开发命令、依赖指纹、日志、故障处理和实测耗时统一见[开发环境与日常开发](docs/development/开发环境与日常开发.md)。
-- 当前只有空项目骨架和环境证据，尚未实现任何 Command Block、命令执行或永久删除产品行为。
+- 当前已实现并实测固定 Windows PowerShell 的 Rust 后端执行内核，但尚未接入 Tauri IPC 或 React 界面，因此仍没有用户可操作的 Command Block 或永久删除产品功能。
 
 ## 不得破坏的全局约束
 
@@ -88,6 +88,5 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 | 计划 ID | 类型 | 文档 |
 |---|---|---|
 | SCOPE-CMDBOX-001 | 产品拆分 | [CmdBox MVP 产品拆分](docs/开发计划/产品拆分-CmdBox-MVP.md) |
-| ATOMIC-EXEC-BACKEND-001 | 原子开发 | [CMD-01 后端执行内核原子计划](docs/开发计划/原子开发计划-CMD-01后端执行内核.md) |
 
 <!-- codex-plan-index:end -->

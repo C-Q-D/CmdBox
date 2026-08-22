@@ -394,9 +394,10 @@ mod tests {
         let script = "$utf8 = New-Object System.Text.UTF8Encoding($false); [Console]::OutputEncoding = $utf8; $stdin = [Console]::In.ReadToEnd(); [Console]::Out.WriteLine('标准输出中文'); [Console]::Out.WriteLine(\"stdin=$($stdin.Length)\"); [Console]::Error.WriteLine('标准错误中文')";
         let runner = WindowsPowerShellRunner::resolve().expect("系统应提供 Windows PowerShell");
         let artifact = PowerShellArtifact::create(script).expect("应创建测试脚本");
-        let mut process = ManagedProcess::spawn(&runner, artifact, &std::env::temp_dir())
-            .expect("应启动受管 PowerShell");
-        let capture = OutputCapture::start(process.take_output().expect("应取得输出 Pipe"));
+        let mut prepared = ManagedProcess::prepare(&runner, artifact, &std::env::temp_dir())
+            .expect("应准备受管 PowerShell");
+        let capture = OutputCapture::start(prepared.take_output().expect("应取得输出 Pipe"));
+        let process = prepared.resume().expect("应恢复受管 PowerShell");
 
         assert_eq!(process.wait().expect("PowerShell 应自然退出"), 0);
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -430,9 +431,10 @@ mod tests {
         let script = "$utf8 = New-Object System.Text.UTF8Encoding($false); [Console]::OutputEncoding = $utf8; 1..200000 | ForEach-Object { [Console]::Out.WriteLine('0123456789abcdef') }";
         let runner = WindowsPowerShellRunner::resolve().expect("系统应提供 Windows PowerShell");
         let artifact = PowerShellArtifact::create(script).expect("应创建测试脚本");
-        let mut process = ManagedProcess::spawn(&runner, artifact, &std::env::temp_dir())
-            .expect("应启动受管 PowerShell");
-        let capture = OutputCapture::start(process.take_output().expect("应取得输出 Pipe"));
+        let mut prepared = ManagedProcess::prepare(&runner, artifact, &std::env::temp_dir())
+            .expect("应准备受管 PowerShell");
+        let capture = OutputCapture::start(prepared.take_output().expect("应取得输出 Pipe"));
+        let process = prepared.resume().expect("应恢复受管 PowerShell");
         let started = Instant::now();
 
         assert_eq!(process.wait().expect("高频输出进程不应被实时队列阻塞"), 0);
