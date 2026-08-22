@@ -5,7 +5,7 @@
 - 计划 ID：ATOMIC-UI-PROTOTYPE-001
 - 类型：atomic-development
 - 修订版本：1
-- 状态：active
+- 状态：completed
 - 父级 ID：不适用
 - 创建基线：74a8f53
 
@@ -92,7 +92,7 @@
 
 ## UI-PROTOTYPE-02 提供无副作用原型交互并通过视觉 QA
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：用户可以搜索命令、移除目标、观察 Preview 失效、恢复演示状态，并检查永久删除动作而不会执行命令。
 - 唯一目标：让已复刻的工作区成为可验证且无外部副作用的交互原型。
 - 当前行为与目标行为：静态骨架只能阅读；完成后关键控件拥有可见、可访问、可测试的本地状态变化，并通过选中原型的浏览器视觉对照。
@@ -119,3 +119,11 @@
 - 风险等级：L1
 - DDD 门禁：不触发；破坏性动作被明确限制为无副作用原型说明。
 - 计划提交信息：`feat(ui): [UI-PROTOTYPE-02] 完成安全交互与视觉验收`
+
+### 执行记录
+
+- 实际实现：搜索框可过滤原型 Command Block；移除或清空目标会使 Preview 和安全结论失效并禁用永久删除；恢复入口回到固定 Ready Fixture；添加文件夹与永久删除都只打开可键盘关闭的无副作用说明。
+- 视觉修正：按 `1487 × 1058` 源图调整工作区两列三行网格、标题与 Runner 比例、10 条可见索引、右侧安全栏、Preview 行号、品牌脚注和动作尺寸；完整记录见项目根 `design-qa.md`。
+- 浏览器验证：Chromium DevTools 完成 Ready、搜索、移除、恢复、disabled、两个说明对话框及 Escape；检查 `1240 × 900`、`980 × 900`、`500 × 812`，无水平溢出；最终 reload 后控制台无 error、warning 或 issue；Lighthouse Accessibility 100、Best Practices 100。
+- 自动验证：`pnpm check` 通过，包括 4 个前端测试、TypeScript、Vite 生产构建、19 个 Rust 单元测试和 1 个 Windows 集成测试；禁用能力扫描和 `git diff --check` 通过。
+- 最终证据：`docs/design/Command-Workspace-implementation-ready.png` 与 `design-qa.md`，`final result: passed`。

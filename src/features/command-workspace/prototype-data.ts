@@ -47,6 +47,13 @@ export const prototypeCommands: readonly PrototypeCommandSummary[] = [
     icon: "hash",
   },
   {
+    id: "checksum-manifest",
+    name: "生成校验清单（SHA256）",
+    description: "为交付目录生成文件校验清单",
+    runner: "PowerShell",
+    icon: "hash",
+  },
+  {
     id: "git-reset",
     name: "重置 Git 工作区（保留忽略）",
     description: "恢复工作区到可复现状态",
@@ -60,7 +67,24 @@ export const prototypeCommands: readonly PrototypeCommandSummary[] = [
     runner: "PowerShell",
     icon: "delete",
   },
+  {
+    id: "registry-backup",
+    name: "导出注册表备份",
+    description: "导出指定注册表分支的本地备份",
+    runner: "PowerShell",
+    icon: "archive",
+  },
+  {
+    id: "delete-empty-directories",
+    name: "删除空目录（递归）",
+    description: "递归移除不包含文件的空目录",
+    runner: "PowerShell",
+    icon: "delete",
+  },
 ];
+
+/** 原型索引中显示的完整 Command Block 总量。 */
+export const prototypeCommandCount = 24;
 
 /** Rust Core 规范化结果的原型快照；不是前端自行计算的执行参数。 */
 export const prototypeTargets = [

@@ -65,6 +65,8 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 |---|---|---|
 | 领域 | [领域语言](CONTEXT.md) | 项目专有术语及应避免的混用名称 |
 | 视觉 | [Command Workspace 视觉原型](docs/design/Command-Workspace-视觉原型.png) | 用户确认的 `editorial-field-notes` 方案 1，前端视觉实现真值 |
+| 视觉证据 | [Command Workspace 实现截图](docs/design/Command-Workspace-implementation-ready.png) | `1487 × 1058` Ready 状态浏览器实现证据 |
+| 视觉验收 | [Command Workspace 视觉 QA](design-qa.md) | 源图、实现、交互、响应式与可访问性对照记录 |
 | 项目状态 | [项目工作台](docs/ai-project/项目工作台.md) | 当前阶段、授权、风险、验收摘要和恢复入口 |
 | 项目状态 | [项目阶段记录](docs/ai-project/项目阶段记录.md) | 阶段、关口和产物台账 |
 | 产品 | [产品需求](docs/product/产品需求.md) | 当前定位、MVP、流程、业务规则和验收条件 |
@@ -74,6 +76,7 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 | 开发 | [开发环境与日常开发](docs/development/开发环境与日常开发.md) | 环境检查、快速启动、Docker、Tauri、构建与故障处理 |
 | 活动计划 | [CmdBox MVP 产品拆分](docs/开发计划/产品拆分-CmdBox-MVP.md) | 可独立验收的交付单元和依赖 |
 | 已完成计划 | [开发环境与项目骨架原子计划](docs/开发计划/原子开发计划-开发环境与项目骨架.md) | 已验证的开发环境、Docker 和 Windows 主机入口准备记录 |
+| 已完成计划 | [Command Workspace 前端视觉原型计划](docs/开发计划/原子开发计划-Command-Workspace前端视觉原型.md) | 已验证的无副作用 React 原型、交互与视觉 QA 记录 |
 | 验收 | [测试与验收](docs/testing/测试与验收.md) | 实现及发布必须取得的验证证据 |
 
 ## 实现与文档同步
@@ -91,6 +94,5 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 | 计划 ID | 类型 | 文档 |
 |---|---|---|
 | SCOPE-CMDBOX-001 | 产品拆分 | [CmdBox MVP 产品拆分](docs/开发计划/产品拆分-CmdBox-MVP.md) |
-| ATOMIC-UI-PROTOTYPE-001 | 原子开发 | [Command Workspace 前端视觉原型计划](docs/开发计划/原子开发计划-Command-Workspace前端视觉原型.md) |
 
 <!-- codex-plan-index:end -->
