@@ -64,6 +64,7 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 | 类别 | 文档 | 用途 |
 |---|---|---|
 | 领域 | [领域语言](CONTEXT.md) | 项目专有术语及应避免的混用名称 |
+| 视觉 | [Command Workspace 视觉原型](docs/design/Command-Workspace-视觉原型.png) | 用户确认的 `editorial-field-notes` 方案 1，前端视觉实现真值 |
 | 项目状态 | [项目工作台](docs/ai-project/项目工作台.md) | 当前阶段、授权、风险、验收摘要和恢复入口 |
 | 项目状态 | [项目阶段记录](docs/ai-project/项目阶段记录.md) | 阶段、关口和产物台账 |
 | 产品 | [产品需求](docs/product/产品需求.md) | 当前定位、MVP、流程、业务规则和验收条件 |
@@ -90,5 +91,6 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 | 计划 ID | 类型 | 文档 |
 |---|---|---|
 | SCOPE-CMDBOX-001 | 产品拆分 | [CmdBox MVP 产品拆分](docs/开发计划/产品拆分-CmdBox-MVP.md) |
+| ATOMIC-UI-PROTOTYPE-001 | 原子开发 | [Command Workspace 前端视觉原型计划](docs/开发计划/原子开发计划-Command-Workspace前端视觉原型.md) |
 
 <!-- codex-plan-index:end -->
