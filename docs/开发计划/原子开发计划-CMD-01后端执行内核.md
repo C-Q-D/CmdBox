@@ -59,7 +59,7 @@
 
 ## EXEC-BE-01 确定性解析 Windows PowerShell Runner
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：后端能确定当前系统的 Windows PowerShell 5.1 可执行文件和固定非交互参数。
 - 唯一目标：返回不依赖 `PATH` 的 Windows PowerShell Runner 描述。
 - 当前行为与目标行为：当前没有 Runner 模型；完成后 Rust 调用方可取得绝对 executable、稳定 runner 类型和构造固定脚本参数的方法。
@@ -79,6 +79,10 @@
 - 风险等级：L2，Runner 路径属于执行安全契约。
 - DDD 门禁：规划质疑已覆盖；提交前审查完整 diff 与 Runner 测试，必须为 PASS。
 - 计划提交信息：`feat(core): [EXEC-BE-01] 确定 Windows PowerShell Runner`
+
+### 执行记录
+
+- 实际验证：Runner 窄测试 3 项通过；`cargo check --manifest-path src-tauri/Cargo.toml` 通过；`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` 通过；提交前 DDD 复核为 `PASS`。
 
 ## EXEC-BE-02 生成并复验临时 PowerShell Artifact
 
