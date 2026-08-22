@@ -87,5 +87,6 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 | 计划 ID | 类型 | 文档 |
 |---|---|---|
 | SCOPE-CMDBOX-001 | 产品拆分 | [CmdBox MVP 产品拆分](docs/开发计划/产品拆分-CmdBox-MVP.md) |
+| ATOMIC-EXEC-BACKEND-001 | 原子开发 | [CMD-01 后端执行内核原子计划](docs/开发计划/原子开发计划-CMD-01后端执行内核.md) |
 
 <!-- codex-plan-index:end -->
