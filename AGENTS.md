@@ -25,6 +25,15 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 - React 不得直接拼接 Shell 参数，也不得获得任意进程执行或任意 PID 终止能力。
 - 当前不做：Interactive Terminal、PTY、持续 stdin、SSH 长连接、Workflow、云同步、团队、Marketplace、Plugin、Agent、定时任务。
 
+## 开发环境入口
+
+- 完整 Windows 桌面开发：`dev.cmd`；后台启动使用 `dev.cmd -Detached`，精确重启/停止使用 `restart.cmd` / `stop.cmd`。
+- 纯前端 Docker 开发：`web-dev.cmd`；后台启动使用 `web-dev.cmd -Detached`，停止使用 `web-stop.cmd`。
+- 日常小步验证：`pnpm check:fast`；提交前完整验证：`pnpm check`；完整 `pnpm tauri build` 只用于里程碑或发布。
+- `src/` 修改走 Vite HMR，`src-tauri/src/` 修改走 Tauri Watch + Cargo Incremental；不要为普通源码修改手工重建 Bundle。
+- 开发命令、依赖指纹、日志、故障处理和实测耗时统一见[开发环境与日常开发](docs/development/开发环境与日常开发.md)。
+- 当前只有空项目骨架和环境证据，尚未实现任何 Command Block、命令执行或永久删除产品行为。
+
 ## 不得破坏的全局约束
 
 1. Preview 必须绑定完整 `ExecutionSpec`；Run 时重新读取、渲染、校验并比较 Hash。
@@ -59,8 +68,9 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 | 技术 | [技术设计](docs/architecture/技术设计.md) | 技术栈、核心模型、数据流、IPC 和持久化 |
 | 技术约束 | [性能设计](docs/architecture/性能设计.md) | Output、UI、日志、SQLite 和 Benchmark 约束 |
 | 技术约束 | [安全与可靠性设计](docs/architecture/安全与可靠性设计.md) | 路径、进程树、Runner、Outcome 和故障隔离 |
+| 开发 | [开发环境与日常开发](docs/development/开发环境与日常开发.md) | 环境检查、快速启动、Docker、Tauri、构建与故障处理 |
 | 活动计划 | [CmdBox MVP 产品拆分](docs/开发计划/产品拆分-CmdBox-MVP.md) | 可独立验收的交付单元和依赖 |
-| 活动计划 | [开发环境与项目骨架原子计划](docs/开发计划/原子开发计划-开发环境与项目骨架.md) | 开发前环境、Docker 和 Windows 主机入口准备 |
+| 已完成计划 | [开发环境与项目骨架原子计划](docs/开发计划/原子开发计划-开发环境与项目骨架.md) | 已验证的开发环境、Docker 和 Windows 主机入口准备记录 |
 | 验收 | [测试与验收](docs/testing/测试与验收.md) | 实现及发布必须取得的验证证据 |
 
 ## 实现与文档同步
@@ -77,6 +87,5 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 | 计划 ID | 类型 | 文档 |
 |---|---|---|
 | SCOPE-CMDBOX-001 | 产品拆分 | [CmdBox MVP 产品拆分](docs/开发计划/产品拆分-CmdBox-MVP.md) |
-| ATOMIC-ENV-001 | 原子开发 | [开发环境与项目骨架原子计划](docs/开发计划/原子开发计划-开发环境与项目骨架.md) |
 
 <!-- codex-plan-index:end -->

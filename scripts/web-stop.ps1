@@ -7,25 +7,12 @@
 param()
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "common.ps1")
+
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $runtimeDirectory = Join-Path $projectRoot ".cmdbox"
 $statePath = Join-Path $runtimeDirectory "web-watch.json"
 $workerPath = Join-Path $PSScriptRoot "web-watch-worker.ps1"
-
-<# 递归停止给定宿主进程及其子进程。 #>
-function Stop-ProcessTree {
-    param(
-        # 已确认属于当前仓库的进程 ID。
-        [int]$ProcessId
-    )
-
-    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId"
-    foreach ($child in $children) {
-        Stop-ProcessTree -ProcessId $child.ProcessId
-    }
-
-    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
-}
 
 if (Test-Path -LiteralPath $statePath) {
     $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
@@ -46,7 +33,7 @@ if (Test-Path -LiteralPath $statePath) {
             throw "状态文件中的进程不属于当前仓库，已拒绝停止 PID $recordedProcessId。"
         }
 
-        Stop-ProcessTree -ProcessId $recordedProcessId
+        Stop-CmdBoxProcessTree -RootProcessId $recordedProcessId
     }
 
     Remove-Item -LiteralPath $statePath -Force

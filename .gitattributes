@@ -1,0 +1,2 @@
+# Windows CMD 入口必须以 CRLF 检出，避免 cmd.exe 错误拼接相邻命令行。
+*.cmd text eol=crlf

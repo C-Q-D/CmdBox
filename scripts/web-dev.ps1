@@ -136,12 +136,16 @@ $watchProcess = Start-Process `
     -PassThru
 
 [pscustomobject]@{
+    # 用于停止 Compose Watch 及其 Docker CLI 子进程的根进程 ID。
     processId = $watchProcess.Id
+    # 防止状态文件被复制到其他仓库后误用。
     projectRoot = $projectRoot
+    # 停止前必须匹配的内部工作脚本路径。
     workerPath = $workerPath
+    # 本地排障所需的启动时间。
     startedAt = [DateTimeOffset]::Now.ToString("O")
 } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
 
 Wait-FrontendReady -WatchProcess $watchProcess
 Write-Host "CmdBox 前端已在后台就绪：http://localhost:1420"
-Write-Host "停止命令：powershell -ExecutionPolicy Bypass -File scripts/web-stop.ps1"
+Write-Host "停止命令：web-stop.cmd"
