@@ -1,0 +1,21 @@
+# Windows 与常见编辑器生成的本地文件
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+.vscode/
+
+# 后续前端、Rust 与 Tauri 构建产物
+node_modules/
+dist/
+target/
+src-tauri/target/
+
+# 本地日志、数据库和敏感环境配置
+*.log
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
