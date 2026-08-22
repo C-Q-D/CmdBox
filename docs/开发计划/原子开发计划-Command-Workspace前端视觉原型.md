@@ -58,7 +58,7 @@
 
 ## UI-PROTOTYPE-01 复刻静态 Command Workspace
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：在现有 CmdBox 前端打开与选中方案 1 同构的 Ready 状态工作区。
 - 唯一目标：以真实 React 结构复刻选中原型的静态信息架构和视觉层级。
 - 当前行为与目标行为：当前只显示环境准备卡片；完成后显示三栏 CmdBox 桌面工作区、三个目标、Preview、安全结论和动作区。
@@ -84,6 +84,11 @@
 - 风险等级：L1
 - DDD 门禁：不触发；本原子不含公共 API、权限、并发或不可逆副作用。
 - 计划提交信息：`feat(ui): [UI-PROTOTYPE-01] 复刻 Command Workspace 视觉骨架`
+
+### 执行记录
+
+- 实际实现：已建立三栏 Command Workspace、集中原型数据、Ready Preview、安全结论与动作区；图标采用按图标直引，前端仍无 Tauri IPC、进程或文件系统调用。
+- 实际验证：`pnpm test -- src/app/App.test.tsx` 通过（1 个测试）；`pnpm typecheck` 通过；`pnpm build` 通过（70 个模块，Vite 构建阶段约 720 ms）；禁用能力扫描与 `git diff --check` 通过。
 
 ## UI-PROTOTYPE-02 提供无副作用原型交互并通过视觉 QA
 

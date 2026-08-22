@@ -1,22 +1,32 @@
-/** 验证 CmdBox 空骨架向开发者呈现稳定、可识别的开发入口。 */
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import App from "./App";
 
-/** 每个测试结束后清理 jsdom 中的 React 根节点。 */
 afterEach(function cleanupRenderedApp() {
   cleanup();
 });
 
-describe("CmdBox 开发环境准备页", function describeReadinessPage() {
-  /** 验证环境状态和两类日常开发路径同时可见。 */
-  it("呈现准备完成状态及 Windows、Docker 入口", function renderReadinessPage() {
+describe("CmdBox Command Workspace 视觉原型", function describeWorkspace() {
+  it("呈现统一 Ready 工作区的核心证据与动作", function renderReadyWorkspace() {
     render(<App />);
 
     expect(
-      screen.getByRole("heading", { name: "环境准备完成" }),
+      screen.getByRole("heading", {
+        name: "快速永久删除多个文件夹",
+        level: 1,
+      }),
     ).toBeDefined();
-    expect(screen.getByText("Windows Tauri Dev")).toBeDefined();
-    expect(screen.getByText("Docker + Vite")).toBeDefined();
+    expect(screen.getByRole("navigation", { name: "主导航" })).toBeDefined();
+    expect(screen.getByLabelText("Command Block 索引")).toBeDefined();
+    expect(screen.getByText(String.raw`D:\项目缓存`)).toBeDefined();
+    expect(screen.getByText(String.raw`E:\旧版构建产物`)).toBeDefined();
+    expect(screen.getByText(String.raw`F:\临时 下载`)).toBeDefined();
+    expect(screen.getByText("预览已就绪")).toBeDefined();
+    expect(screen.getByText("安全检查通过")).toBeDefined();
+    expect(screen.getByLabelText("PowerShell 命令预览")).toHaveProperty(
+      "textContent",
+      expect.stringContaining("-LiteralPath"),
+    );
+    expect(screen.getByRole("button", { name: "永久删除" })).toBeDefined();
   });
 });
