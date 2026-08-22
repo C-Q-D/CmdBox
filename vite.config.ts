@@ -8,7 +8,6 @@ import react from "@vitejs/plugin-react";
  * Tauri 配置和健康检查共享同一个入口。Rust 目录由 Tauri 自己监听，Vite 不重复扫描。
  */
 
-// @ts-expect-error 当前基线不额外引入 Node 类型，只读取 Tauri 官方约定的环境变量。
 const host = process.env.TAURI_DEV_HOST;
 
 /** 创建适用于 Tauri 的 Vite 配置。 */
@@ -29,8 +28,13 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // Rust 变更由 Tauri Watch 处理，前端监听只覆盖 Web 资源。
-      ignored: ["**/src-tauri/**"],
+      // Rust、文档和本地运行状态有各自的处理者，Vite 只监听 Web 资源。
+      ignored: [
+        "**/src-tauri/**",
+        "**/target/**",
+        "**/docs/**",
+        "**/.cmdbox/**",
+      ],
     },
   },
 }));

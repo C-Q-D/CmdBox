@@ -5,7 +5,7 @@
  */
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
+import App from "./app/App";
 
 /** 将 CmdBox 根组件挂载到页面中的唯一根节点。 */
 function bootstrapApp() {
