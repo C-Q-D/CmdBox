@@ -1,0 +1,50 @@
+# CmdBox 纯前端开发服务；完整 Windows 桌面开发请使用宿主 Tauri 入口。
+name: cmdbox
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+      target: development
+    init: true
+    ports:
+      - "1420:1420"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:1420').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 3s
+      timeout: 2s
+      start_period: 15s
+      retries: 10
+    stop_grace_period: 5s
+    develop:
+      watch:
+        - action: sync
+          path: ./src
+          target: /workspace/src
+          initial_sync: true
+        - action: sync+restart
+          path: ./index.html
+          target: /workspace/index.html
+        - action: sync+restart
+          path: ./vite.config.ts
+          target: /workspace/vite.config.ts
+        - action: sync
+          path: ./tsconfig.json
+          target: /workspace/tsconfig.json
+        - action: sync
+          path: ./tsconfig.node.json
+          target: /workspace/tsconfig.node.json
+        - action: sync
+          path: ./vitest.config.ts
+          target: /workspace/vitest.config.ts
+        - action: rebuild
+          path: ./package.json
+        - action: rebuild
+          path: ./pnpm-lock.yaml
+        - action: rebuild
+          path: ./pnpm-workspace.yaml

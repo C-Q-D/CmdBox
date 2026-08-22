@@ -1,0 +1,12 @@
+# Docker 前端镜像只接收运行 Vite 所需的项目文件。
+.git/
+.cmdbox/
+.vscode/
+dist/
+docs/
+node_modules/
+scripts/
+src-tauri/
+target/
+*.log
+*.md

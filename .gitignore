@@ -13,6 +13,7 @@ src-tauri/target/
 *.tsbuildinfo
 
 # 本地日志、数据库和敏感环境配置
+.cmdbox/
 *.log
 *.db
 *.db-shm

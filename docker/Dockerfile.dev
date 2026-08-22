@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+
+# CmdBox 的 Docker 环境只运行前端 Vite 服务；Windows Tauri 与 Rust 仍在宿主开发。
+FROM node:24-bookworm-slim AS dependencies
+
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+
+WORKDIR /workspace
+
+RUN corepack enable \
+    && corepack prepare pnpm@11.19.0 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+
+RUN --mount=type=cache,id=cmdbox-pnpm-store,target=/pnpm/store \
+    pnpm install --frozen-lockfile --store-dir=/pnpm/store
+
+FROM dependencies AS development
+
+COPY index.html tsconfig.json tsconfig.node.json vite.config.ts vitest.config.ts ./
+COPY src ./src
+
+EXPOSE 1420
+
+HEALTHCHECK --interval=3s --timeout=2s --start-period=15s --retries=10 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:1420').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+
+CMD ["pnpm", "dev", "--host", "0.0.0.0"]
