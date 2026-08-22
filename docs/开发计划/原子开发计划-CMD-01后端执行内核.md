@@ -140,7 +140,7 @@
 
 ## EXEC-BE-04 非阻塞 Drain 并排序 stdout/stderr 输出
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：固定脚本高频输出时，后端持续 Drain 两个 Pipe，并生成有序、有界的纯文本 Batch。
 - 唯一目标：把受管进程的 stdout/stderr 转成不会被慢消费者反向阻塞的有序输出事件。
 - 当前行为与目标行为：`EXEC-BE-03` 只管理进程；完成后两个 Reader 独立尽快读取，Aggregator 在入口观察时统一分配 sequence，并按 32 KiB 或 33 ms 形成 Batch。
@@ -160,6 +160,10 @@
 - 风险等级：L3，涉及并发、顺序和背压不变量。
 - DDD 门禁：规划质疑已覆盖；提交前审查完整 diff、并发顺序和压力测试，必须为 PASS。
 - 计划提交信息：`feat(core): [EXEC-BE-04] 有界聚合 PowerShell 输出`
+
+### 执行记录
+
+- 实际验证：输出模块测试 4 项通过（跨块 UTF-8、跨流顺序、真实 PowerShell 中文及 stdin EOF、慢消费者压力与有界队列）；受管进程窄测试 3 项通过；启用 `process-test-helper` 的独立 Core 强退集成测试 1 项通过；`cargo check --manifest-path src-tauri/Cargo.toml` 通过；`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features process-test-helper -- -D warnings` 通过；提交前 DDD 复核为 `PASS`。
 
 ## EXEC-BE-05 组合固定脚本 Execution Session
 

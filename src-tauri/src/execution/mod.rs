@@ -5,3 +5,6 @@
 
 /// 临时 PowerShell Artifact。
 pub mod artifact;
+
+/// stdout/stderr 快速 Drain、增量解码与有界 Batch。
+pub mod output;

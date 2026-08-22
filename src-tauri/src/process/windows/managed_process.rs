@@ -10,18 +10,24 @@ use std::fmt::{Display, Formatter};
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{FromRawHandle, RawHandle};
 use std::path::{Path, PathBuf};
-use std::ptr::null;
+use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_FAILED, WAIT_OBJECT_0,
+};
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
+use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, ResumeThread, TerminateProcess, WaitForSingleObject,
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+    STARTUPINFOW,
 };
 
 use crate::execution::artifact::{ArtifactError, PowerShellArtifact};
@@ -135,6 +141,14 @@ impl OwnedHandle {
     fn raw(&self) -> HANDLE {
         self.raw
     }
+
+    /// 把 Pipe 读端句柄转交给标准库 File，由 File 负责后续关闭。
+    fn into_file(self) -> std::fs::File {
+        let raw = self.raw;
+        std::mem::forget(self);
+        // SAFETY: 句柄由 CreatePipe 创建且所有权刚从 OwnedHandle 转移，File 将唯一关闭它。
+        unsafe { std::fs::File::from_raw_handle(raw as RawHandle) }
+    }
 }
 
 /// 关闭当前对象唯一拥有的 Win32 Handle。
@@ -207,6 +221,68 @@ impl Drop for PendingStartupProcess {
     }
 }
 
+/// 父进程持有的 stdout/stderr Pipe 读端。
+#[derive(Debug)]
+pub struct CapturedOutput {
+    /// PowerShell stdout 的唯一读端。
+    stdout: std::fs::File,
+    /// PowerShell stderr 的唯一读端。
+    stderr: std::fs::File,
+}
+
+impl CapturedOutput {
+    /// 把两个读端交给独立 Reader 线程。
+    pub fn into_readers(self) -> (std::fs::File, std::fs::File) {
+        (self.stdout, self.stderr)
+    }
+}
+
+/// CreateProcessW 前创建的三组标准流 Pipe。
+#[derive(Debug)]
+struct StandardPipes {
+    /// 父进程读取 stdout 的非继承端。
+    stdout_read: OwnedHandle,
+    /// 子进程写入 stdout 的继承端。
+    stdout_write: OwnedHandle,
+    /// 父进程读取 stderr 的非继承端。
+    stderr_read: OwnedHandle,
+    /// 子进程写入 stderr 的继承端。
+    stderr_write: OwnedHandle,
+    /// 子进程读取 stdin 的继承端；父端关闭后始终得到 EOF。
+    stdin_read: OwnedHandle,
+    /// 父进程持有但不写入的 stdin 端。
+    stdin_write: OwnedHandle,
+}
+
+impl StandardPipes {
+    /// 创建标准流 Pipe，并确保只有子进程所需的三个端可继承。
+    fn create() -> Result<Self, ManagedProcessError> {
+        let (stdout_read, stdout_write) = create_inherited_pipe()?;
+        let (stderr_read, stderr_write) = create_inherited_pipe()?;
+        let (stdin_read, stdin_write) = create_inherited_stdin_pipe()?;
+        Ok(Self {
+            stdout_read,
+            stdout_write,
+            stderr_read,
+            stderr_write,
+            stdin_read,
+            stdin_write,
+        })
+    }
+
+    /// 在进程成功创建后关闭父进程不需要的子端，并转交两个输出读端。
+    fn into_captured_output(self) -> CapturedOutput {
+        drop(self.stdout_write);
+        drop(self.stderr_write);
+        drop(self.stdin_read);
+        drop(self.stdin_write);
+        CapturedOutput {
+            stdout: self.stdout_read.into_file(),
+            stderr: self.stderr_read.into_file(),
+        }
+    }
+}
+
 /// 设置 KILL_ON_JOB_CLOSE 的独立 Execution Job。
 #[derive(Debug)]
 struct KillOnCloseJob {
@@ -273,6 +349,8 @@ pub struct ManagedProcess {
     process_id: u32,
     /// 保持临时脚本到进程对象结束，防止运行期间被提前清理。
     _artifact: PowerShellArtifact,
+    /// 尚未交给输出协调器的 stdout/stderr 读端。
+    output: Option<CapturedOutput>,
 }
 
 impl ManagedProcess {
@@ -319,6 +397,11 @@ impl ManagedProcess {
         let current_directory = wide_null_terminated(working_directory.as_os_str());
         let mut startup_info: STARTUPINFOW = unsafe { zeroed() };
         startup_info.cb = size_of::<STARTUPINFOW>() as u32;
+        let pipes = StandardPipes::create()?;
+        startup_info.dwFlags = STARTF_USESTDHANDLES;
+        startup_info.hStdOutput = pipes.stdout_write.raw();
+        startup_info.hStdError = pipes.stderr_write.raw();
+        startup_info.hStdInput = pipes.stdin_read.raw();
         let mut process_info: PROCESS_INFORMATION = unsafe { zeroed() };
 
         // SAFETY: 路径缓冲区均以 NUL 结尾并在调用期间有效；命令行是可写 UTF-16；不继承
@@ -329,7 +412,7 @@ impl ManagedProcess {
                 command_line.as_mut_ptr(),
                 null(),
                 null(),
-                0,
+                1,
                 CREATE_SUSPENDED | CREATE_NO_WINDOW,
                 null(),
                 current_directory.as_ptr(),
@@ -342,6 +425,7 @@ impl ManagedProcess {
         }
 
         let pending = PendingStartupProcess::new(process_info);
+        let output = pipes.into_captured_output();
         assign(&job, pending.process_handle(), pending.process_id())?;
 
         // SAFETY: 主线程 Handle 有效且进程仍保持 CreateProcessW 建立的首次挂起计数。
@@ -356,12 +440,18 @@ impl ManagedProcess {
             job,
             process_id,
             _artifact: artifact,
+            output: Some(output),
         })
     }
 
     /// 返回受管根进程 PID，仅供状态观测；取消仍必须按 Execution Job 进行。
     pub fn process_id(&self) -> u32 {
         self.process_id
+    }
+
+    /// 取出 stdout/stderr 读端；每个受管进程只允许转交一次。
+    pub fn take_output(&mut self) -> Option<CapturedOutput> {
+        self.output.take()
     }
 
     /// 阻塞等待根进程结束并返回原始 Exit Code；后续会话层会把它放入专用等待任务。
@@ -390,6 +480,51 @@ impl ManagedProcess {
     pub fn terminate_job(&self) -> Result<(), ManagedProcessError> {
         self.job.terminate()
     }
+}
+
+/// 创建匿名 Pipe，写端保留继承标志，读端清除继承标志供父进程持有。
+fn create_inherited_pipe() -> Result<(OwnedHandle, OwnedHandle), ManagedProcessError> {
+    let security = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: null_mut(),
+        bInheritHandle: 1,
+    };
+    let mut read = null_mut();
+    let mut write = null_mut();
+    // SAFETY: 输出指针和安全属性在调用期间有效，系统返回两个新的 Pipe Handle。
+    if unsafe { CreatePipe(&mut read, &mut write, &security, 0) } == 0 {
+        return Err(last_win32_error(ManagedProcessOperation::CreateProcess));
+    }
+    let read = OwnedHandle::new(read);
+    let write = OwnedHandle::new(write);
+    // SAFETY: 读端 Handle 有效；清除继承位，避免子进程持有导致父 Reader 永远收不到 EOF。
+    if unsafe { SetHandleInformation(read.raw(), HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return Err(last_win32_error(ManagedProcessOperation::CreateProcess));
+    }
+    Ok((read, write))
+}
+
+/// 创建 stdin Pipe，保留子进程读端继承位并清除父进程写端继承位。
+fn create_inherited_stdin_pipe() -> Result<(OwnedHandle, OwnedHandle), ManagedProcessError> {
+    let security = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: null_mut(),
+        bInheritHandle: 1,
+    };
+    let mut read = null_mut();
+    let mut write = null_mut();
+    // SAFETY: 输出指针和安全属性在调用期间有效，系统返回两个新的 Pipe Handle。
+    if unsafe { CreatePipe(&mut read, &mut write, &security, 0) } == 0 {
+        return Err(last_win32_error(ManagedProcessOperation::CreateProcess));
+    }
+    let read = OwnedHandle::new(read);
+    let write = OwnedHandle::new(write);
+    // SAFETY: 父进程写端 Handle 有效；清除继承位后子进程只继承 stdin 读端。父进程在
+    // CreateProcessW 返回后关闭写端，子进程随即得到 EOF，符合 NonInteractive 契约。
+    if unsafe { SetHandleInformation(write.raw(), HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return Err(last_win32_error(ManagedProcessOperation::CreateProcess));
+    }
+    Ok((read, write))
 }
 
 /// 读取最近 Win32 错误并绑定到稳定操作。
