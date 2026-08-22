@@ -86,7 +86,7 @@
 
 ## EXEC-BE-02 生成并复验临时 PowerShell Artifact
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：中文固定脚本以 Windows PowerShell 5.1 可确定读取的字节格式落盘，并能在启动前发现篡改。
 - 唯一目标：创建持有 expected hash 且可在 spawn 前复验的临时 PowerShell Artifact。
 - 当前行为与目标行为：当前没有临时脚本；完成后每次创建唯一目录和固定 `script.ps1`，完整写入、flush 并计算 SHA-256，调用方可在紧邻启动前再次校验。
@@ -106,6 +106,10 @@
 - 风险等级：L2，Artifact 完整性属于执行安全接缝。
 - DDD 门禁：规划质疑已覆盖；提交前审查完整 diff、篡改测试和清理边界，必须为 PASS。
 - 计划提交信息：`feat(core): [EXEC-BE-02] 生成可复验 PowerShell Artifact`
+
+### 执行记录
+
+- 实际验证：Artifact 窄测试 3 项通过；`cargo check --manifest-path src-tauri/Cargo.toml` 通过；`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` 通过；提交前 DDD 复核为 `PASS`。
 
 ## EXEC-BE-03 创建并终止受 Job Object 管理的挂起进程
 

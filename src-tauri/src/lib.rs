@@ -7,6 +7,9 @@
 #[cfg(windows)]
 pub mod process;
 
+/// 一次性任务的 Artifact 与后续执行会话能力。
+pub mod execution;
+
 /// 创建并运行 CmdBox Tauri 应用。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
