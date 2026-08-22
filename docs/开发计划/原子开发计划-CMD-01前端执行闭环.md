@@ -5,7 +5,7 @@
 - 计划 ID：ATOMIC-CMD-01-UI-001
 - 类型：atomic-development
 - 修订版本：1
-- 状态：active
+- 状态：complete
 - 父级 ID：CMD-01
 - 创建基线：8fc90cb
 
@@ -173,7 +173,7 @@
 
 ## CMD01-HOST-01 真实 Windows/Tauri 闭环取得验收证据
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：CMD-01 的完整真实宿主场景与 AC-01、AC-05、AC-08 当前归属。
 - 唯一目标：证明 React → Typed IPC → Rust Core → Windows Process 的固定任务闭环满足 CMD-01。
 - 当前行为与目标行为：自动测试不能替代真实宿主；完成后每个要求场景都有可复现证据，否则父级不标完成。
@@ -201,3 +201,7 @@
 - 风险等级：L3
 - DDD 门禁：提交前审查真实证据、状态声明和任何缺陷修复 diff，必须 `PASS`。
 - 计划提交信息：`test(host): [CMD01-HOST-01] 验收固定任务执行闭环`
+
+### 执行记录
+
+- 实际验证：真实 Tauri 窗口依次通过自然结束、整树取消、自然结束边缘 Cancel、WebView Debugger 暂停消费 10 秒、刷新断开 Channel、Core 强制退出和不可信文本呈现；每个进程树场景最终诊断子进程数均为 0，Output 区未生成链接或 HTML 元素。验收结束后 `stop.cmd` 成功，临时 WebView2 调试参数已撤销；提交前 L3 DDD 审查为 `PASS`。

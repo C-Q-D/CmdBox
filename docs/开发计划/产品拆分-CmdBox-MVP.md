@@ -68,7 +68,7 @@
 
 ## CMD-01 运行并控制一个固定的一次性 PowerShell 任务
 
-- 状态：in_progress
+- 状态：done
 - 用户或业务价值：用户能在 CmdBox 中启动一个非交互 PowerShell 任务，实时看到输出，并在需要时终止整个任务。
 - 参与者：Windows 用户。
 - 触发与前置条件：CmdBox 已启动；系统存在确定的 Windows PowerShell Runner。
@@ -172,9 +172,9 @@
 
 # 下一步
 
-- 当前选择：`CMD-01`，由 `ATOMIC-CMD-01-UI-001` 连续执行。
-- 开发方式：Typed IPC、TypeScript Gateway、真实 React Workspace 和 Windows/Tauri 宿主验收逐原子验证、提交并同步远端。
-- 当前停止条件：真实宿主验收无法取得必要证据，或发现需要扩大到任意执行、文件删除等未授权能力。
+- 最近完成：`CMD-01`；`ATOMIC-CMD-01-UI-001` 的四个原子均已验证并同步远端。
+- 下一推荐：`CMD-02`，先规划 Typed Parameter、Preview Hash、PowerShell/CMD Serializer 和最小真实 UI 路径；当前不自动进入实现。
+- 当前停止条件：等待用户检查 `CMD-01` 结果并授权下一产品单元。
 
 # 计划变更记录
 
