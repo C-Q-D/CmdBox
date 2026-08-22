@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "CmdBox 主窗口的最小本地能力；业务权限按实际功能逐项增加。",
+  "windows": ["main"],
+  "permissions": []
+}

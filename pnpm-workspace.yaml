@@ -1,0 +1,3 @@
+# 依赖构建脚本默认拒绝，只放行前端打包器所需的 esbuild 安装步骤。
+allowBuilds:
+  esbuild: true

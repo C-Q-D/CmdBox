@@ -1,0 +1,123 @@
+/* CmdBox 环境准备页的最小样式；产品 UI 建立后由正式设计系统替换。 */
+
+:root {
+  font-family:
+    Inter, "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #1f2937;
+  background: #f3f4f6;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+.readiness-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+.readiness-card {
+  width: min(760px, 100%);
+  padding: 48px;
+  border: 1px solid #d1d5db;
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.08);
+}
+
+.eyebrow {
+  margin: 0 0 12px;
+  color: #4f46e5;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2rem, 6vw, 3.4rem);
+  line-height: 1.08;
+  letter-spacing: -0.04em;
+}
+
+.summary {
+  max-width: 620px;
+  margin: 20px 0 32px;
+  color: #4b5563;
+  font-size: 1.05rem;
+}
+
+.entry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.entry-grid article {
+  padding: 20px;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  background: #f9fafb;
+}
+
+.entry-grid span,
+.entry-grid strong {
+  display: block;
+}
+
+.entry-grid span {
+  margin-bottom: 6px;
+  color: #6b7280;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+}
+
+.entry-grid strong {
+  font-size: 1.05rem;
+}
+
+.entry-grid p {
+  margin: 8px 0 0;
+  color: #6b7280;
+  font-size: 0.9rem;
+}
+
+.status {
+  margin: 28px 0 0;
+  padding-top: 20px;
+  border-top: 1px solid #e5e7eb;
+  color: #374151;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 640px) {
+  .readiness-page {
+    padding: 16px;
+  }
+
+  .readiness-card {
+    padding: 28px;
+  }
+
+  .entry-grid {
+    grid-template-columns: 1fr;
+  }
+}
