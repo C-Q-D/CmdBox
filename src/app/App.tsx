@@ -1,13 +1,13 @@
-import { CommandWorkspacePrototype } from "../features/command-workspace/CommandWorkspacePrototype";
+import { CommandWorkspace } from "../features/command-workspace/CommandWorkspace";
 import "./App.css";
 
 /**
- * 装配当前经过用户确认的 Command Workspace 前端视觉原型。
+ * 装配继承已确认视觉语法的正式 Command Workspace。
  *
- * 原型不连接 Tauri IPC，也不会执行任何命令或文件系统操作。
+ * 当前默认入口只接入 Rust Core 内置的无破坏 CMD-01 固定验收任务。
  */
 function App() {
-  return <CommandWorkspacePrototype />;
+  return <CommandWorkspace />;
 }
 
 export default App;

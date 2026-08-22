@@ -1,22 +1,35 @@
-/** Command Workspace 视觉原型使用的命令摘要。 */
-export interface PrototypeCommandSummary {
+/** Command Workspace 当前显示的命令摘要。 */
+export interface CommandSummary {
+  /** Command Block 的稳定标识。 */
   id: string;
+  /** 命令列表和工作区使用的名称。 */
   name: string;
+  /** 搜索和摘要使用的简短说明。 */
   description: string;
+  /** 当前固定展示的 Runner 摘要。 */
   runner: "PowerShell";
-  icon: "delete" | "calendar" | "rename" | "archive" | "hash" | "git";
+  /** 统一图标注册表中的图标标识。 */
+  icon: "terminal" | "delete" | "calendar" | "rename" | "archive" | "hash" | "git";
+  /** 当前是否为工作区选中命令。 */
   selected?: boolean;
 }
 
-/** 视觉原型中可见的 Command Block 列表。 */
-export const prototypeCommands: readonly PrototypeCommandSummary[] = [
+/** 当前工作区索引可见的 Command Block 摘要。 */
+export const commandSummaries: readonly CommandSummary[] = [
+  {
+    id: "execution-channel-diagnostic",
+    name: "执行链路验收",
+    description: "验证实时输出、自然结束与整树取消",
+    runner: "PowerShell",
+    icon: "terminal",
+    selected: true,
+  },
   {
     id: "delete-folders-permanently",
     name: "快速永久删除多个文件夹",
     description: "永久删除指定的多个文件夹",
     runner: "PowerShell",
     icon: "delete",
-    selected: true,
   },
   {
     id: "cleanup-old-temp-files",
@@ -74,34 +87,15 @@ export const prototypeCommands: readonly PrototypeCommandSummary[] = [
     runner: "PowerShell",
     icon: "archive",
   },
-  {
-    id: "delete-empty-directories",
-    name: "删除空目录（递归）",
-    description: "递归移除不包含文件的空目录",
-    runner: "PowerShell",
-    icon: "delete",
-  },
 ];
 
-/** 原型索引中显示的完整 Command Block 总量。 */
-export const prototypeCommandCount = 24;
+/** 索引中显示的完整 Command Block 总量。 */
+export const commandSummaryCount = 25;
 
-/** Rust Core 规范化结果的原型快照；不是前端自行计算的执行参数。 */
-export const prototypeTargets = [
-  String.raw`D:\项目缓存`,
-  String.raw`E:\旧版构建产物`,
-  String.raw`F:\临时 下载`,
+/** 固定任务的用户可读范围，不包含可由前端改写的脚本文本。 */
+export const fixedExecutionSteps = [
+  "启动确定的 Windows PowerShell 5.1 非交互进程",
+  "周期输出 stdout / stderr 与不可信文本样本",
+  "创建受同一 Job 管理的诊断子进程",
+  "自然结束时清理整个 Job 和临时脚本",
 ] as const;
-
-/** 只读 Preview 原型；真实产品中只能由 Rust Core 返回。 */
-export const prototypePreview = `$ErrorActionPreference = 'Stop'
-$targets = @(
-  'D:\\项目缓存',
-  'E:\\旧版构建产物',
-  'F:\\临时 下载'
-) | ForEach-Object { (Resolve-Path -LiteralPath $_).ProviderPath }
-
-foreach ($p in $targets) {
-  if (-not (Test-Path -LiteralPath $p)) { throw "路径不存在: $p" }
-  Remove-Item -LiteralPath $p -Recurse -Force
-}`;
