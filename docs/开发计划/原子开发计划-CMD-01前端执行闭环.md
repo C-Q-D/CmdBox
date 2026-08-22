@@ -78,7 +78,7 @@
 
 ## CMD01-IPC-01 Rust 暴露固定任务的窄 Typed IPC
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：AC-01、AC-05、AC-08 的 Rust/Tauri 接缝。
 - 唯一目标：让 Tauri 调用方只能启动固定验收任务并按 Execution ID 请求整树取消。
 - 当前行为与目标行为：当前 `lib.rs` 没有业务命令；完成后注册 `start_fixed_execution` 和 `cancel_execution`，并共享一个 `ExecutionManager`。
@@ -103,6 +103,10 @@
 - 风险等级：L3
 - DDD 门禁：提交前审查完整 Rust diff、公共 IPC、安全边界和并发语义，必须 `PASS`。
 - 计划提交信息：`feat(ipc): [CMD01-IPC-01] 暴露固定任务执行通道`
+
+### 执行记录
+
+- 实际验证：`cargo test --manifest-path src-tauri/Cargo.toml ipc::execution` 5 项通过；完整 Rust 单元测试 24 项和 Windows 集成测试 1 项通过；`cargo fmt --check` 与严格 Clippy 通过；提交前 L3 DDD 第二轮复审为 `PASS`。
 
 ## CMD01-IPC-02 TypeScript 通过类型化网关消费 IPC
 
@@ -189,4 +193,3 @@
 - 风险等级：L3
 - DDD 门禁：提交前审查真实证据、状态声明和任何缺陷修复 diff，必须 `PASS`。
 - 计划提交信息：`test(host): [CMD01-HOST-01] 验收固定任务执行闭环`
-
