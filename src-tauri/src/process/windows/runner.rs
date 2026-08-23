@@ -191,6 +191,15 @@ impl ResolvedRunner {
 }
 
 impl ProcessLaunch {
+    /// 返回当前受管 Artifact 的唯一临时目录，仅供 Session 清理回归测试观察。
+    #[cfg(test)]
+    pub(crate) fn temporary_directory(&self) -> &Path {
+        self.materialized_script
+            .script_path()
+            .parent()
+            .expect("受管脚本必须位于唯一临时目录")
+    }
+
     /// 返回 CreateProcessW 使用的确定性绝对可执行文件路径。
     pub(crate) fn executable(&self) -> &Path {
         &self.executable

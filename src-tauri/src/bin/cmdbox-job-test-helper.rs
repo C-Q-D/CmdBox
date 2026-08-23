@@ -6,9 +6,10 @@
 
 use std::error::Error;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cmdbox_lib::execution::artifact::{MaterializedScript, RenderedScript};
 use cmdbox_lib::process::windows::managed_process::ManagedProcess;
@@ -18,21 +19,21 @@ use cmdbox_lib::process::windows::runner::WindowsPowerShellRunner;
 fn main() -> Result<(), Box<dyn Error>> {
     let control_directory = control_directory_from_arguments()?;
     fs::create_dir_all(&control_directory)?;
-    let child_pid_file = control_directory.join("child.pid");
-    let escaped_child_pid_file = child_pid_file.to_string_lossy().replace('\'', "''");
-    let script = format!(
-        "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d /c ping -t 127.0.0.1' -PassThru; Set-Content -LiteralPath '{escaped_child_pid_file}' -Value $child.Id; Wait-Process -Id $child.Id"
-    );
+    let script = "$utf8 = New-Object System.Text.UTF8Encoding($false); [Console]::OutputEncoding = $utf8; $child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 5') -PassThru; [Console]::Out.WriteLine(\"child-pid:$($child.Id)\"); Wait-Process -Id $child.Id";
     let runner = WindowsPowerShellRunner::resolve()?;
-    let rendered = RenderedScript::windows_powershell(&script);
+    let rendered = RenderedScript::windows_powershell(script);
     let artifact = MaterializedScript::create(rendered)?;
     let launch = runner.process_launch(artifact, &std::env::temp_dir());
-    let managed = ManagedProcess::spawn(launch)?;
+    let mut prepared = ManagedProcess::prepare(launch)?;
+    let output = prepared.take_output().ok_or("受管进程缺少输出读端")?;
+    let managed = prepared.resume()?;
     fs::write(
         control_directory.join("root.pid"),
         managed.process_id().to_string(),
     )?;
-    wait_for_file(&child_pid_file)?;
+    let (stdout, _stderr) = output.into_readers();
+    let child_pid = read_child_pid(BufReader::new(stdout))?;
+    fs::write(control_directory.join("child.pid"), child_pid.to_string())?;
     fs::write(control_directory.join("ready"), b"ready")?;
 
     // 保持 `managed` 在作用域中，使 helper 存活期间持有 Job Handle；外部测试会强制结束进程。
@@ -40,6 +41,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     loop {
         thread::sleep(Duration::from_secs(60));
     }
+}
+
+/// 从无害 PowerShell 回显的首行读取子进程 PID，不等待短等待子进程自然结束。
+fn read_child_pid(mut stdout: BufReader<std::fs::File>) -> Result<u32, Box<dyn Error>> {
+    let mut line = String::new();
+    stdout.read_line(&mut line)?;
+    let value = line
+        .trim()
+        .strip_prefix("child-pid:")
+        .ok_or("PowerShell 未返回预期子进程 PID")?;
+    Ok(value.parse()?)
 }
 
 /// 从第一个命令行参数读取外部测试创建的控制目录。
@@ -50,16 +62,4 @@ fn control_directory_from_arguments() -> Result<PathBuf, Box<dyn Error>> {
         return Err("控制目录必须是绝对路径".into());
     }
     Ok(path)
-}
-
-/// 等待受管 PowerShell 写出子进程 PID，避免过早声明 helper 已就绪。
-fn wait_for_file(path: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if path.is_file() {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    Err(format!("子进程 PID 文件未按期生成：{}", path.display()).into())
 }

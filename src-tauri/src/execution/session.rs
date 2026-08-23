@@ -1,28 +1,29 @@
-//! 固定 Windows PowerShell 的 Execution Session 组合与有界事件接收端。
+//! 已验证 Execution 的 Session 组合与有界事件接收端。
 //!
 //! Session 在恢复进程前完成事件队列、输出 Reader、Active 索引和取消入口绑定。运行线程只
 //! 负责等待根进程、关闭 Job、等待输出 Drain 完成并发布唯一终态，不持有 Manager 全局锁。
-//! 固定入口先冻结最终脚本字节，再解析 Runner、创建临时租约并交付字段私有 `ProcessLaunch`。
+//! 唯一生产入口只消费 Planner 生成的 `VerifiedExecution`，不能接受脚本或 Runner 旁路参数。
 
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::io;
+#[cfg(test)]
 use std::path::Path;
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::execution::artifact::{ArtifactError, MaterializedScript, RenderedScript};
+use crate::execution::artifact::ArtifactError;
 use crate::execution::manager::{
     lock_unpoisoned, ActiveExecution, ExecutionControlState, ExecutionId, ExecutionManager,
 };
 use crate::execution::output::{OutputBatch, OutputCapture};
+use crate::execution::planner::VerifiedExecution;
 use crate::process::windows::managed_process::{
     ManagedProcess, ManagedProcessError, CMDBOX_CANCEL_EXIT_CODE,
 };
-use crate::process::windows::runner::{RunnerResolveError, WindowsPowerShellRunner};
 
 /// 单个 Session 最多保留的待消费事件数；输出满时丢弃，生命周期事件始终保留。
 const SESSION_EVENT_CAPACITY: usize = 64;
@@ -30,9 +31,7 @@ const SESSION_EVENT_CAPACITY: usize = 64;
 /// Execution Session 启动失败。
 #[derive(Debug)]
 pub enum ExecutionStartError {
-    /// 无法解析固定 Windows PowerShell Runner。
-    Runner(RunnerResolveError),
-    /// 无法创建临时 PowerShell Artifact。
+    /// 无法创建已验证脚本的临时 Artifact。
     Artifact(ArtifactError),
     /// 无法准备或恢复受管进程。
     Process(ManagedProcessError),
@@ -43,7 +42,6 @@ pub enum ExecutionStartError {
 impl Display for ExecutionStartError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Runner(source) => write!(formatter, "Execution Runner 解析失败：{source}"),
             Self::Artifact(source) => write!(formatter, "Execution Artifact 创建失败：{source}"),
             Self::Process(source) => write!(formatter, "Execution 进程启动失败：{source}"),
             Self::Thread(source) => write!(formatter, "Execution 后台线程创建失败：{source}"),
@@ -54,7 +52,6 @@ impl Display for ExecutionStartError {
 impl Error for ExecutionStartError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Runner(source) => Some(source),
             Self::Artifact(source) => Some(source),
             Self::Process(source) => Some(source),
             Self::Thread(source) => Some(source),
@@ -327,24 +324,20 @@ impl EventSink {
 }
 
 impl ExecutionManager {
-    /// 启动一个固定脚本文本的 Windows PowerShell Session。
-    pub fn start_fixed_powershell(
+    /// 启动一个已由 Planner 全量复验的 Execution，并返回专属有界事件接收端。
+    ///
+    /// 本方法消费授权值后才创建 Artifact；调用方不能传入脚本、可执行文件、Runner 参数或
+    /// 工作目录。进程恢复前会完成 Output、Active 与取消能力绑定。
+    pub fn start(
         &self,
-        script: &str,
-        working_directory: &Path,
+        verified: VerifiedExecution,
     ) -> Result<StartedExecution, ExecutionStartError> {
-        let execution_id = ExecutionId::new_v4();
-        let rendered = RenderedScript::windows_powershell(script);
-        let runner = WindowsPowerShellRunner::resolve().map_err(ExecutionStartError::Runner)?;
-        let artifact =
-            MaterializedScript::create(rendered).map_err(ExecutionStartError::Artifact)?;
+        let launch = verified
+            .into_process_launch()
+            .map_err(ExecutionStartError::Artifact)?;
         #[cfg(test)]
-        let temporary_directory = artifact
-            .script_path()
-            .parent()
-            .expect("Artifact 脚本必须位于唯一临时目录")
-            .to_path_buf();
-        let launch = runner.process_launch(artifact, working_directory);
+        let temporary_directory = launch.temporary_directory().to_path_buf();
+        let execution_id = ExecutionId::new_v4();
         let mut prepared = ManagedProcess::prepare(launch).map_err(ExecutionStartError::Process)?;
         let process_id = prepared.process_id();
         let output = prepared
@@ -513,18 +506,23 @@ mod tests {
     use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
 
     use super::{ExecutionEvent, ExecutionManager, StartedExecution};
-    use crate::execution::artifact::ArtifactError;
     use crate::execution::manager::ActiveExecutionState;
     use crate::execution::output::OutputStream;
-    use crate::execution::planner::VerifiedExecution;
-    use crate::process::windows::runner::ProcessLaunch;
+    use crate::execution::planner::{verified_windows_powershell_for_test, VerifiedExecution};
 
-    /// 以 sibling 模块编译边界证明 Session 能消费授权值，但不能取得或改写其私有字段。
+    /// 以方法类型证明 Session 唯一启动入口只接受 Planner 授权值。
     #[test]
-    fn accepts_verified_execution_through_single_consuming_launch_boundary() {
-        let boundary: fn(VerifiedExecution) -> Result<ProcessLaunch, ArtifactError> =
-            VerifiedExecution::into_process_launch;
+    fn accepts_only_verified_execution_through_start_boundary() {
+        let boundary: fn(
+            &ExecutionManager,
+            VerifiedExecution,
+        ) -> Result<StartedExecution, super::ExecutionStartError> = ExecutionManager::start;
         let _ = boundary;
+    }
+
+    /// 把无害测试脚本包装为仅在测试构建存在的 Planner 授权值。
+    fn verified_test_script(script: &str) -> VerifiedExecution {
+        verified_windows_powershell_for_test(script, std::env::temp_dir())
     }
 
     /// 在统一截止时间内读取到唯一终态，并返回包括 Started/Output 在内的完整事件序列。
@@ -585,7 +583,7 @@ mod tests {
         let manager = ExecutionManager::new();
         let script = "$utf8 = New-Object System.Text.UTF8Encoding($false); [Console]::OutputEncoding = $utf8; [Console]::Out.Write('标准输出中文'); [Console]::Error.Write('标准错误中文')";
         let started = manager
-            .start_fixed_powershell(script, &std::env::temp_dir())
+            .start(verified_test_script(script))
             .expect("应启动固定 PowerShell Session");
         let execution_id = started.execution_id;
         let temporary_directory = started.temporary_directory().to_path_buf();
@@ -634,7 +632,7 @@ mod tests {
     fn preserves_non_zero_exit_code_as_finished() {
         let manager = ExecutionManager::new();
         let started = manager
-            .start_fixed_powershell("exit 7", &std::env::temp_dir())
+            .start(verified_test_script("exit 7"))
             .expect("应启动非零退出脚本");
         let events = collect_until_terminal(&started);
         assert!(matches!(
@@ -647,27 +645,36 @@ mod tests {
     #[test]
     fn natural_root_exit_cleans_remaining_job_descendants() {
         let manager = ExecutionManager::new();
-        let pid_file =
-            std::env::temp_dir().join(format!("cmdbox-session-child-{}.pid", uuid::Uuid::new_v4()));
-        let escaped_pid_file = pid_file.to_string_lossy().replace('\'', "''");
-        let script = format!(
-            "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d /c ping -t 127.0.0.1' -PassThru; Set-Content -LiteralPath '{escaped_pid_file}' -Value $child.Id; exit 0"
-        );
+        let script = "$child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 5') -PassThru; [Console]::Out.WriteLine(\"child-pid:$($child.Id)\"); exit 0";
         let started = manager
-            .start_fixed_powershell(&script, &std::env::temp_dir())
+            .start(verified_test_script(script))
             .expect("应启动会创建子进程的脚本");
         let events = collect_until_terminal(&started);
         assert!(matches!(
             events.last(),
             Some(ExecutionEvent::Finished { exit_code: 0, .. })
         ));
-        let child_pid = std::fs::read_to_string(&pid_file)
-            .expect("根进程应写出子进程 PID")
-            .trim()
-            .parse::<u32>()
-            .expect("子进程 PID 应为 u32");
+        let stdout = events
+            .iter()
+            .filter_map(|event| match event {
+                ExecutionEvent::Output { batch, .. } => Some(
+                    batch
+                        .fragments
+                        .iter()
+                        .filter(|fragment| fragment.stream == OutputStream::Stdout)
+                        .map(|fragment| fragment.text.as_str())
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect::<String>();
+        let child_pid = stdout
+            .split("child-pid:")
+            .nth(1)
+            .and_then(|value| value.lines().next())
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .expect("根进程应输出无害短等待子进程 PID");
         assert_process_already_exited(child_pid);
-        let _ = std::fs::remove_file(pid_file);
     }
 
     /// 验证首次取消推进 Cancelling，重复取消幂等，确认 Job 结束后只发布一个 Cancelled。
@@ -675,7 +682,7 @@ mod tests {
     fn cancels_job_idempotently_and_removes_active_execution() {
         let manager = ExecutionManager::new();
         let started = manager
-            .start_fixed_powershell("Start-Sleep -Seconds 30", &std::env::temp_dir())
+            .start(verified_test_script("Start-Sleep -Seconds 5"))
             .expect("应启动长任务");
         let first = manager
             .cancel(started.execution_id)
@@ -709,7 +716,7 @@ mod tests {
         let script = "1..200000 | ForEach-Object { [Console]::Out.WriteLine('0123456789abcdef') }";
         let started_at = Instant::now();
         let started = manager
-            .start_fixed_powershell(script, &std::env::temp_dir())
+            .start(verified_test_script(script))
             .expect("应启动高频输出脚本");
         std::thread::sleep(Duration::from_secs(2));
         assert!(started.events.pending_len() <= super::SESSION_EVENT_CAPACITY);
@@ -738,10 +745,7 @@ mod tests {
         for delay in [0_u64, 30, 150, 400] {
             let manager = ExecutionManager::new();
             let started = manager
-                .start_fixed_powershell(
-                    "Start-Sleep -Milliseconds 80; exit 9",
-                    &std::env::temp_dir(),
-                )
+                .start(verified_test_script("Start-Sleep -Milliseconds 80; exit 9"))
                 .expect("应启动竞态脚本");
             std::thread::sleep(Duration::from_millis(delay));
             let cancel = manager

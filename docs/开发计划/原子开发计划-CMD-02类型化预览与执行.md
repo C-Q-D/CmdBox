@@ -125,7 +125,7 @@ CMD02-TEMPLATE-01┘                                      │
 
 ## CMD02-PS-RUN-01 接通 PowerShell Preview 执行
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：PowerShell 内置 Block 从窄 IPC Preview 后执行，显示安全参数回显并可取消。
 - 唯一目标：让现有 Execution Core 只启动 `VerifiedExecution`。
 - 当前行为与目标行为：当前 Tauri 只能启动固定脚本；完成后 list/get/preview/run/cancel 均按 Command Block 业务命名，固定脚本旁路删除。
@@ -145,6 +145,12 @@ CMD02-TEMPLATE-01┘                                      │
 - 风险等级：L3
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(core): [CMD02-PS-RUN-01] 接通 PowerShell Preview 执行`
+
+### 执行记录
+
+- 实际交付：Tauri 后端只注册 list/get/preview/run/cancel 五个 Command Block 命令；Run 在任何 Artifact、进程、Active 或转发线程副作用前完成 `verify_run`，唯一生产启动入口消费字段私有的 `VerifiedExecution`。固定脚本旁路已删除；公开同步错误使用稳定码和脱敏文案，Channel 断开不取消已经启动的 Execution。
+- 实际验证：IPC 9 项、Session 7 项、完整 Rust 单元测试 64 项和 Windows Job Object 集成测试 1 项通过；普通应用构建、`cargo fmt --check`、strict Clippy、`git diff --check` 与危险命令文本审计通过。真实 PowerShell 测试只运行参数回显、有限输出、非零退出和短等待/取消；L3 隔离复核结论为 `PASS`。
+- 计划偏差：当前 Windows 主机上的 Tauri `test` feature 探针因测试 EXE 缺少 Common Controls v6 清单，在 Rust 测试主体运行前触发 `TaskDialogIndirect` 装载错误；诊断探针与临时目录已移除，正式应用不受影响。Tauri Command 层改用生产 IPC Adapter 直接测试，并由普通 Tauri 应用构建验证注册表。
 
 ## CMD02-CMD-01 增加确定性 CMD 执行适配
 

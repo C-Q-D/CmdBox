@@ -344,7 +344,6 @@ impl VerifiedExecution {
     /// 只有 `verify_run` 成功后才能调用；本方法会创建受管临时脚本目录并写入已经绑定 Hash
     /// 的完整 Artifact。失败时返回 Artifact 错误且不会启动进程，成功后调用方仍无法修改
     /// executable、Runner options、工作目录或脚本路径。
-    #[allow(dead_code)]
     pub(crate) fn into_process_launch(self) -> Result<ProcessLaunch, ArtifactError> {
         let Self {
             rendered_script,
@@ -353,6 +352,23 @@ impl VerifiedExecution {
         } = self;
         let materialized_script = MaterializedScript::create(rendered_script)?;
         Ok(resolved_runner.process_launch(materialized_script, &working_directory))
+    }
+}
+
+/// 为 Session 的底层进程生命周期回归测试构造测试专用授权值。
+///
+/// 该入口只在测试构建存在，不能成为生产或 IPC 绕过 Preview 的启动旁路。脚本文本只允许由
+/// 当前仓库内的无害回显、有限输出、退出码和短等待测试提供。
+#[cfg(test)]
+pub(crate) fn verified_windows_powershell_for_test(
+    script: &str,
+    working_directory: PathBuf,
+) -> VerifiedExecution {
+    VerifiedExecution {
+        rendered_script: RenderedScript::windows_powershell(script),
+        resolved_runner: WindowsPowerShellRunner::resolve()
+            .expect("测试系统应提供 Windows PowerShell"),
+        working_directory,
     }
 }
 

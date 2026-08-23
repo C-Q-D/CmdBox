@@ -22,7 +22,7 @@ pub mod parameter;
 /// Command Block Definition、可信 Preview 与 Run 复验的唯一业务入口。
 pub mod planner;
 
-/// 固定 Windows PowerShell 的后端 Execution Session。
+/// 只消费 Planner 授权值的后端 Execution Session。
 pub mod session;
 
 /// Windows PowerShell 字面量序列化与 Template AST 渲染，仅供 Planner 使用。

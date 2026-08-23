@@ -1,7 +1,7 @@
 //! CmdBox Tauri 应用库入口。
 //!
-//! 应用入口负责装配共享 Execution Manager，并且只注册经过产品切片确认的窄业务命令。
-//! 当前 IPC 只能启动固定验收任务或按 Execution ID 取消，不暴露任意进程能力。
+//! 应用入口装配无状态 Planner 与共享 Execution Manager，并且只注册 Command Block 的窄
+//! 业务命令。IPC 不暴露任意脚本、可执行文件、工作目录、环境、PID 或进程终止能力。
 
 /// Windows 本地进程与 Runner 的后端能力。
 #[cfg(windows)]
@@ -17,9 +17,13 @@ pub mod ipc;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(execution::planner::ExecutionPlanner::new())
         .manage(execution::manager::ExecutionManager::new())
         .invoke_handler(tauri::generate_handler![
-            ipc::execution::start_fixed_execution,
+            ipc::execution::list_command_blocks,
+            ipc::execution::get_command_block,
+            ipc::execution::preview_command_block,
+            ipc::execution::run_command_block,
             ipc::execution::cancel_execution
         ])
         .run(tauri::generate_context!())
