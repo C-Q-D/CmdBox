@@ -60,9 +60,6 @@ export type ApiError = Omit<WireApiError, "code" | "message"> & {
   message: string;
 };
 
-/** 兼容现有 Workspace 的固定任务启动响应，与通用 Run 响应结构相同。 */
-export type StartFixedExecutionResponse = RunCommandResponse;
-
 /** 兼容现有 Workspace 的 Active 状态别名。 */
 export type ActiveExecutionState = IpcActiveExecutionState;
 
@@ -84,16 +81,6 @@ export interface CommandExecutionGateway {
     request: VerifyRunRequest,
     onEvent: (event: ExecutionStreamEvent) => void,
   ): Promise<RunCommandResponse>;
-  /** 按 Execution UUID 请求终止对应 Job。 */
-  cancelExecution(executionId: string): Promise<CancelExecutionResponse>;
-}
-
-/** 现有 Workspace 在后续 UI-RUN 原子前继续接受注入的固定任务 Gateway 类型。 */
-export interface FixedExecutionGateway {
-  /** 仅供现有测试替身保持固定任务调用契约。 */
-  startFixedExecution(
-    onEvent: (event: ExecutionStreamEvent) => void,
-  ): Promise<StartFixedExecutionResponse>;
   /** 按 Execution UUID 请求终止对应 Job。 */
   cancelExecution(executionId: string): Promise<CancelExecutionResponse>;
 }
@@ -169,15 +156,6 @@ export function createCommandExecutionGateway(
       return invokeSafely(transport, "cancel_execution", { executionId });
     },
   };
-}
-
-/**
- * 保留现有 Workspace 的旧 Factory 出口，但不再构造后端已移除的固定任务 Gateway。
- *
- * @returns 固定返回 `null`；测试需要旧 UI 状态时应直接注入 `FixedExecutionGateway` 替身。
- */
-export function createFixedExecutionGateway(): null {
-  return null;
 }
 
 /** 调用一个固定 Command，并把任意拒绝值收敛成安全前端错误。 */

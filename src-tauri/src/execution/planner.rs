@@ -888,7 +888,10 @@ mod tests {
         let planner = ExecutionPlanner::new();
         let summaries = planner.list_command_blocks();
 
-        assert_eq!(summaries.len(), 2);
+        #[cfg(not(feature = "ui-validation"))]
+        assert_eq!(summaries.len(), 2, "默认 Planner 只能列出两个正式 Built-in");
+        #[cfg(feature = "ui-validation")]
+        assert_eq!(summaries.len(), 3, "显式验证构建应只追加一个 Definition");
         assert_eq!(summaries[0].id, POWERSHELL_PARAMETER_ECHO_ID);
         let summary_json = serde_json::to_value(&summaries[0]).expect("Summary 应可序列化");
         assert_eq!(
@@ -1015,7 +1018,7 @@ mod tests {
 
     /// 验证请求 Map 的构造顺序不影响 Definition 顺序、脚本或完整 Hash。
     #[test]
-    fn parameter_map_insertion_order_does_not_change_preview_hash() {
+    fn parameter_map_insertion_order_does_not_change_execution_spec_hash() {
         let planner = ExecutionPlanner::new();
         let first_values = valid_values(true);
         let mut second_values = BTreeMap::new();

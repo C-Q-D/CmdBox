@@ -1,8 +1,9 @@
 //! CMD-02 使用的固定无破坏 Command Block Definition。
 //!
-//! 本模块只声明 PowerShell 与 CMD 参数回显 Built-in 的稳定身份、Runner、正常风险级别、
-//! 类型化参数和受限模板。Definition 不包含可执行文件、Runner options 或已经渲染的脚本，
-//! 也不会在构造时创建文件或进程。
+//! 本模块声明 PowerShell 与 CMD 参数回显 Built-in 的稳定身份、Runner、正常风险级别、
+//! 类型化参数和受限模板。只有显式 `ui-validation` 构建会额外编译一个无参数短等待
+//! Definition；默认应用仍严格只有两个正式 Built-in。Definition 不包含可执行文件、Runner
+//! options 或已经渲染的脚本，也不会在构造时创建文件或进程。
 
 use std::collections::BTreeMap;
 
@@ -20,11 +21,19 @@ pub const POWERSHELL_PARAMETER_ECHO_ID: &str = "builtin.parameter-echo.windows-p
 /// CMD 参数回显 Built-in 的稳定 ID。
 pub const CMD_PARAMETER_ECHO_ID: &str = "builtin.parameter-echo.cmd";
 
+/// 显式真实宿主验收构建使用的固定短等待 Definition ID。
+#[cfg(feature = "ui-validation")]
+pub const UI_VALIDATION_SHORT_WAIT_ID: &str = "builtin.ui-validation.short-wait";
+
 /// PowerShell 参数回显使用的受限静态模板。
 const POWERSHELL_PARAMETER_ECHO_TEMPLATE: &str = "$ErrorActionPreference = 'Stop'\nWrite-Output {{text}}\nWrite-Output {{count}}\n{{#if enabled}}Write-Output 'enabled'\n{{/if}}Write-Output {{mode}}\nWrite-Output {{folder}}\n{{#each folders}}Write-Output {{this}}\n{{/each}}";
 
 /// CMD 参数回显使用的受限静态模板。
 const CMD_PARAMETER_ECHO_TEMPLATE: &str = "echo({{text}}\r\necho({{count}}\r\n{{#if enabled}}echo(enabled\r\n{{/if}}echo({{mode}}\r\necho({{folder}}\r\n{{#each folders}}echo({{this}}\r\n{{/each}}";
+
+/// 显式真实宿主验收使用的固定五秒 PowerShell 短等待模板。
+#[cfg(feature = "ui-validation")]
+const UI_VALIDATION_SHORT_WAIT_TEMPLATE: &str = "Start-Sleep -Seconds 5";
 
 /// Command Block 的来源身份。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,9 +97,9 @@ pub(crate) struct CommandBlockDefinition {
     pub environment: BTreeMap<String, String>,
 }
 
-/// 按稳定顺序返回 PowerShell 和 CMD 两个正常风险参数回显 Built-in。
-pub(crate) fn builtin_command_definitions() -> [CommandBlockDefinition; 2] {
-    [
+/// 按稳定顺序返回正式 Built-in，并仅在显式验证 feature 下追加短等待 Definition。
+pub(crate) fn builtin_command_definitions() -> Vec<CommandBlockDefinition> {
+    let definitions = vec![
         CommandBlockDefinition {
             id: POWERSHELL_PARAMETER_ECHO_ID.to_owned(),
             name: "PowerShell 参数回显".to_owned(),
@@ -115,7 +124,31 @@ pub(crate) fn builtin_command_definitions() -> [CommandBlockDefinition; 2] {
             parameters: echo_parameter_definitions(),
             environment: BTreeMap::new(),
         },
-    ]
+    ];
+    #[cfg(feature = "ui-validation")]
+    let definitions = {
+        let mut definitions = definitions;
+        definitions.push(ui_validation_short_wait_definition());
+        definitions
+    };
+    definitions
+}
+
+/// 创建只存在于显式验证构建、复用普通 Planner/Runner 的无参数短等待 Definition。
+#[cfg(feature = "ui-validation")]
+fn ui_validation_short_wait_definition() -> CommandBlockDefinition {
+    CommandBlockDefinition {
+        id: UI_VALIDATION_SHORT_WAIT_ID.to_owned(),
+        name: "验证：短等待".to_owned(),
+        description: "用于真实宿主 Cancel 验收的固定五秒等待。".to_owned(),
+        origin: CommandOrigin::Builtin,
+        runner: RunnerType::WindowsPowerShell,
+        risk_level: RiskLevel::Normal,
+        revision: 1,
+        template: UI_VALIDATION_SHORT_WAIT_TEMPLATE.to_owned(),
+        parameters: Vec::new(),
+        environment: BTreeMap::new(),
+    }
 }
 
 /// 创建两个回显 Built-in 共享但彼此独立拥有的六类 Parameter Definition。
@@ -181,7 +214,15 @@ mod tests {
         POWERSHELL_PARAMETER_ECHO_ID,
     };
     use crate::execution::parameter::{validate_parameter_values, ParameterKind, ParameterValue};
+    use crate::execution::planner::ExecutionPlanner;
+    #[cfg(not(feature = "ui-validation"))]
+    use crate::execution::planner::PlannerErrorCode;
+    #[cfg(feature = "ui-validation")]
+    use crate::execution::planner::{PreviewCommandRequest, VerifyRunRequest};
     use crate::execution::template::parse_template;
+
+    /// 显式验证构建使用的固定无参数短等待 Definition ID。
+    const UI_VALIDATION_SHORT_WAIT_ID: &str = "builtin.ui-validation.short-wait";
 
     /// 把当前平台绝对目录转换为结构化 Folder 参数文本。
     fn existing_folder_value() -> String {
@@ -213,16 +254,26 @@ mod tests {
         ])
     }
 
-    /// 验证固定 Definition 的稳定顺序、Built-in 身份、normal 风险和声明 Runner。
+    /// 验证两个正式 Definition 在所有 feature 组合下保持稳定身份、顺序和参数契约。
     #[test]
-    fn exposes_two_stable_normal_risk_builtin_definitions() {
+    fn keeps_two_stable_normal_risk_echo_definitions() {
         let definitions = builtin_command_definitions();
+        let echo_definitions = definitions
+            .iter()
+            .filter(|definition| {
+                matches!(
+                    definition.id.as_str(),
+                    POWERSHELL_PARAMETER_ECHO_ID | CMD_PARAMETER_ECHO_ID
+                )
+            })
+            .collect::<Vec<_>>();
 
-        assert_eq!(definitions[0].id, POWERSHELL_PARAMETER_ECHO_ID);
-        assert_eq!(definitions[0].runner, RunnerType::WindowsPowerShell);
-        assert_eq!(definitions[1].id, CMD_PARAMETER_ECHO_ID);
-        assert_eq!(definitions[1].runner, RunnerType::Cmd);
-        for definition in &definitions {
+        assert_eq!(echo_definitions.len(), 2);
+        assert_eq!(echo_definitions[0].id, POWERSHELL_PARAMETER_ECHO_ID);
+        assert_eq!(echo_definitions[0].runner, RunnerType::WindowsPowerShell);
+        assert_eq!(echo_definitions[1].id, CMD_PARAMETER_ECHO_ID);
+        assert_eq!(echo_definitions[1].runner, RunnerType::Cmd);
+        for definition in echo_definitions {
             assert_eq!(definition.origin, CommandOrigin::Builtin);
             assert_eq!(definition.risk_level, RiskLevel::Normal);
             assert_eq!(definition.revision, 1);
@@ -244,11 +295,81 @@ mod tests {
         }
     }
 
+    /// 验证默认构建严格只暴露两个正式 Built-in，验证 ID 不能经 Planner 读取。
+    #[cfg(not(feature = "ui-validation"))]
+    #[test]
+    fn excludes_ui_validation_definition_from_default_registry() {
+        let planner = ExecutionPlanner::new();
+
+        assert_eq!(planner.list_command_blocks().len(), 2);
+        let error = planner
+            .get_command_block(UI_VALIDATION_SHORT_WAIT_ID)
+            .expect_err("默认 Registry 不得读取验证 Definition");
+        assert_eq!(error.code, PlannerErrorCode::CommandBlockNotFound);
+    }
+
+    /// 验证显式 feature 只追加一个无参数 PowerShell 短等待，并复用同一 Planner 闭环。
+    #[cfg(feature = "ui-validation")]
+    #[test]
+    fn exposes_ui_validation_definition_through_the_same_planner_flow() {
+        let definitions = builtin_command_definitions();
+        let validation_definition = &definitions[2];
+        assert_eq!(definitions.len(), 3);
+        assert_eq!(validation_definition.id, UI_VALIDATION_SHORT_WAIT_ID);
+        assert_eq!(validation_definition.origin, CommandOrigin::Builtin);
+        assert_eq!(validation_definition.runner, RunnerType::WindowsPowerShell);
+        assert_eq!(validation_definition.risk_level, RiskLevel::Normal);
+        assert_eq!(validation_definition.revision, 1);
+        assert_eq!(validation_definition.template, "Start-Sleep -Seconds 5");
+        assert!(validation_definition.parameters.is_empty());
+        assert!(validation_definition.environment.is_empty());
+
+        let planner = ExecutionPlanner::new();
+        let summaries = planner.list_command_blocks();
+
+        assert_eq!(summaries.len(), 3);
+        assert_eq!(summaries[0].id, POWERSHELL_PARAMETER_ECHO_ID);
+        assert_eq!(summaries[1].id, CMD_PARAMETER_ECHO_ID);
+        assert_eq!(summaries[2].id, UI_VALIDATION_SHORT_WAIT_ID);
+        assert_eq!(summaries[2].runner, RunnerType::WindowsPowerShell);
+        assert_eq!(summaries[2].risk_level, RiskLevel::Normal);
+
+        let details = planner
+            .get_command_block(UI_VALIDATION_SHORT_WAIT_ID)
+            .expect("验证 Definition 应通过同一详情入口读取");
+        assert!(details.parameters.is_empty());
+        let request = PreviewCommandRequest {
+            command_block_id: UI_VALIDATION_SHORT_WAIT_ID.to_owned(),
+            expected_revision: details.revision,
+            parameter_values: BTreeMap::new(),
+        };
+        let preview = planner
+            .preview(&request)
+            .expect("验证 Definition 应通过同一 Preview 入口");
+        assert_eq!(preview.preview_text, "Start-Sleep -Seconds 5");
+        assert_eq!(preview.risk_level, RiskLevel::Normal);
+        planner
+            .verify_run(&VerifyRunRequest {
+                command_block_id: request.command_block_id,
+                expected_revision: request.expected_revision,
+                parameter_values: BTreeMap::new(),
+                execution_spec_hash: preview.execution_spec_hash,
+            })
+            .expect("验证 Definition 应通过同一 Run 复验入口");
+    }
+
     /// 验证两个 Built-in 的完整六类值与受限模板都能进入确定的后续语义。
     #[test]
     fn builtin_parameters_and_templates_are_self_consistent() {
         let values = valid_echo_values();
-        for definition in builtin_command_definitions() {
+        let definitions = builtin_command_definitions();
+        let echo_definitions = definitions.iter().filter(|definition| {
+            matches!(
+                definition.id.as_str(),
+                POWERSHELL_PARAMETER_ECHO_ID | CMD_PARAMETER_ECHO_ID
+            )
+        });
+        for definition in echo_definitions {
             let normalized = validate_parameter_values(&definition.parameters, &values)
                 .expect("Built-in 六类值应通过");
             assert_eq!(normalized.entries.len(), 6);

@@ -3,13 +3,14 @@
  *
  * 本模块把可变 Parameter Form 数据转换为与 Gateway 请求相互隔离的只读快照，并在
  * Rust Preview 返回时校验 Command Block 身份。它不计算 Hash、不解释 Safety，也不
- * 参与 Run；后续执行只能消费这里产生的 ConfirmedPreview。
+ * 重算 Hash；后续执行只能消费这里产生的 ConfirmedPreview 深复制请求。
  */
 import type {
   CommandBlockDetails,
   ParameterValue,
   PreviewCommandRequest,
   PreviewCommandResponse,
+  VerifyRunRequest,
 } from "../../generated/contracts";
 
 /** 递归只读类型，覆盖 Preview 中的参数数组、摘要数组和 Safety warnings。 */
@@ -199,4 +200,25 @@ export function acceptPreviewResponse(
       executionSpecHash: responseSnapshot.executionSpecHash,
     }),
   };
+}
+
+/**
+ * 从一次仍获授权的 ConfirmedPreview 创建唯一允许发送的通用 Run 请求。
+ *
+ * 参数在消费时再次深复制并冻结，确保 Gateway 不能通过保留请求引用改写确认快照；
+ * Command Block 身份、revision 与 Hash 则严格原样沿用 Rust 已确认的字段。
+ */
+export function createVerifyRunRequest(
+  confirmedPreview: ConfirmedPreview,
+): VerifyRunRequest {
+  /** 只交给本次 Gateway Run 调用的独立参数图。 */
+  const parameterValues = freezeDeep(
+    cloneParameterValues(confirmedPreview.parameterValues),
+  );
+  return freezeDeep({
+    commandBlockId: confirmedPreview.commandBlockId,
+    expectedRevision: confirmedPreview.revision,
+    parameterValues,
+    executionSpecHash: confirmedPreview.executionSpecHash,
+  });
 }

@@ -5,7 +5,7 @@
 - 计划 ID：ATOMIC-CMD-02-001
 - 类型：atomic-development
 - 修订版本：1
-- 状态：active
+- 状态：done
 - 父级 ID：CMD-02
 - 创建基线：9a0bdcd
 
@@ -16,7 +16,7 @@
 - 当前行为：只有固定、无参数 PowerShell 验收任务；React 不能读取 Command Block Definition，也没有通用参数、Preview 或 CMD Runner。
 - 实现边界：只增加两个 Rust 内置的无破坏验收 Block；不实现用户脚本编辑、Raw Parameter、Command 持久化、Outcome Policy、破坏性路径策略或永久删除。
 - 深模块 Interface：`ExecutionPlanner` 集中读取内置 Definition、严格验证、模板解析、Shell Serializer、完整执行规范 Hash、Preview 和 Run 复验；只有它能构造 `VerifiedExecution`。`ProcessLaunch` 是已验证执行到 Windows Job/Process 内核的内部接缝。
-- 安全边界：React 只提交 Command Block ID、expected revision、结构化 Parameter Value、Preview Hash 和事件 Channel；不得提交脚本、可执行文件、Runner options、最终命令、工作目录旁路或 PID。
+- 安全边界：React 只提交 Command Block ID、expected revision、结构化 Parameter Value、`executionSpecHash` 和事件 Channel；不得提交脚本、可执行文件、Runner options、最终命令、工作目录旁路或 PID。
 - Preview 不变量：Run 必须重新读取当前 Definition，重新验证、规范化、渲染并计算完整 Hash；不匹配时在创建临时目录、Execution、线程或进程前返回 `STALE_PREVIEW`。
 - Output 与 Cancel 不变量：继续使用已验证的 Reader → Aggregator → Batch → Tauri Channel、有界 UI Buffer、Execution ID、sequence、唯一终态和 Windows Job Object 整树取消。
 - 测试命令安全白名单：真实执行只允许文本回显、参数展示和短等待；禁止删除、覆盖、移动、安装、网络访问、注册表、系统配置或其他高影响命令。目录参数只能指向项目内专用测试目录或系统临时目录，命令不得修改其内容。
@@ -24,6 +24,7 @@
 - 并行与 Git：用户明确允许项目内 `.worktree/` 并行。`CMD02-LAUNCH-01` 与 `CMD02-TEMPLATE-01` 可在独立 worktree 同时实现，主分支按原子编号审查并合并；其余按依赖顺序。每个原子独立验证、提交并立即推送 `origin/master`。
 - 整体回归：各原子窄测试；最后执行 `pnpm check`、真实 Windows PowerShell/CMD 集成测试、真实 Tauri 用户流程、响应式/可访问性/控制台检查和无危险命令审计。
 - 计划质疑：L3 隔离复核结果为 `PASS`；原子顺序、私有 `VerifiedExecution`、CMD Environment 注入、窄 IPC 和统一 UI 路径未发现阻断当前最小交付的问题。
+- 完成状态：9/9 个原子均已实现、验证并形成独立交付记录；默认双 Runner、显式短等待 Cancel、三档响应式与安全验收通过，项目停在用户检查关口，不自动进入 `CMD-03`。
 
 ## 原子依赖
 
@@ -120,7 +121,7 @@ CMD02-TEMPLATE-01┘                                      │
 
 ### 执行记录
 
-- 实际交付：新增唯一 `ExecutionPlanner`、PowerShell 单引号 Serializer、有 Schema Version 的 length-prefixed Canonical Execution Spec、规范化有界摘要、完整 Artifact 大小与 Preview Hash；Run 复验先区分 revision conflict，再以同一路径全量重建并比较 Hash。内部 Definition/模板不进入 list/get DTO，请求拒绝未知旁路字段；`VerifiedExecution` 只能经 crate 内消费入口生成字段私有的 `ProcessLaunch`。
+- 实际交付：新增唯一 `ExecutionPlanner`、PowerShell 单引号 Serializer、有 Schema Version 的 length-prefixed Canonical Execution Spec、规范化有界摘要、完整 Artifact 大小与 `executionSpecHash`；Run 复验先区分 revision conflict，再以同一路径全量重建并比较 Hash。内部 Definition/模板不进入 list/get DTO，请求拒绝未知旁路字段；`VerifiedExecution` 只能经 crate 内消费入口生成字段私有的 `ProcessLaunch`。
 - 实际验证：Planner 9 项、Serializer 3 项、Canonical Spec 3 项及 sibling 消费边界测试通过；完整 Rust 单元测试 60 项、Windows 集成 1 项通过；`cargo fmt --check`、strict Clippy 和 `git diff --check` 通过。限定复核发现授权值无法被 Session 消费、list/get 会暴露内部模板，均按最小接口修正并加入回归测试；本原子未新增临时脚本、线程或进程测试。
 
 ## CMD02-PS-RUN-01 接通 PowerShell Preview 执行
@@ -271,19 +272,26 @@ CMD02-TEMPLATE-01┘                                      │
 
 ## CMD02-UI-RUN-01 完成类型化命令宿主闭环
 
-- 状态：in_progress
+- 状态：done
 - 支持的验收场景：用户从当前 Confirmed Preview 运行 PowerShell/CMD，观察字面参数输出、自然结束或取消，并得到稳定反馈。
 - 唯一目标：把 ready Preview 接到既有 Execution Stream 并取得完整真实宿主证据。
 - 当前行为与目标行为：已有表单和 Preview；完成后 Run/Output/Cancel/终态形成完整 CMD-02 产品闭环。
 - 前置条件与依赖：`CMD02-UI-PREVIEW-01`。
-- 代码定位依据：`CommandWorkspace.tsx` 的 CMD-01 run generation/Channel/Output/Cancel 逻辑、Gateway、App tests、视觉 QA 和项目状态文档。
-- 允许修改：Execution 接线、动作状态、结果展示、测试、必要视觉调整和权威状态/验收文档。
+- 代码定位依据：`CommandWorkspace.tsx` 的 Preview generation、CMD-01 run generation/Channel/Output/Cancel 逻辑，`preview-state.ts`、Gateway、Output Buffer、App tests、Windows Job 集成测试、视觉 QA 和权威状态/验收文档。
+- 允许修改：Execution 接线、动作状态、结果展示、Output 双上限、测试安全化、必要视觉调整和权威状态/验收文档；不得增加新的 Rust 业务 IPC。
 - 明确不修改：Outcome Policy、History、持久化、永久删除或任何危险 Command Block。
-- 实现步骤：Run 只读取 ConfirmedPreview 的 ID/revision/完整 Values/完整 Hash；starting 防双击；保留 Execution ID/sequence/generation/唯一终态认证、有界 Output 和 Cancel；finished 后再次运行必须重新 Preview；真实宿主分别运行 PowerShell/CMD 回显 Block并测试 Cancel；执行视觉、响应式、键盘和控制台检查；同步父计划、工作台、阶段记录、测试与验收和活动索引。
-- 接口、数据与错误契约：`STALE_PREVIEW` 清除 Preview 且不创建 Execution；按钮、计时器和 stdout 不能推断 Lifecycle；Output 不解释 HTML/ANSI/URL。
-- 边界与异常：运行中禁止切换/修改；迟到 Cancel 不倒退终态；Browser 无 Tauri 时 Gateway/Picker/窗口动作保持安全降级。
-- 测试要求：双击 Run 一次调用、Run 快照、Stale、Started 前事件缓存、Execution ID/sequence 认证、自然结束、Cancel 竞态、512 KiB 上限、两 Runner 字符矩阵、目录值只回显不修改、无危险命令审计。
-- 验证命令：前端窄测试、`pnpm check`、真实 Windows 集成测试、`dev.cmd -Detached` Tauri 流程、响应式/可访问性/控制台检查、`stop.cmd` 清理后重新启动供用户检查。
+- 状态与授权契约：Preview 与 Execution 状态保持正交；只有 `previewPhase=ready`、Execution 非活跃、当前 ID/revision/Definition generation/configuration generation 全部匹配且存在未消费 `ConfirmedPreview` 时可以 Run。React state 只负责显示，独立 `executablePreviewRef` 表示一次性执行授权；第一次 Run 在任何 `await` 前同步检查 phase snapshot、`runRequestPendingRef` 和授权，立即消费授权并进入 starting，同一提交内双击只能产生一次 Channel 和一次 Gateway 调用。finished 或任何 Run 拒绝后都不能显示“再次运行”或复用旧 Hash，只能由用户明确重新生成 Preview。
+- Run 请求契约：请求只能从已消费的 `ConfirmedPreview` 构造 `{ commandBlockId, expectedRevision, parameterValues, executionSpecHash }`，再次防御性深复制参数；禁止读取 RHF 当前值、Preview 摘要、DOM 或截断文本。请求前递增 run generation，重置认证 Execution ID、sequence、唯一终态、Cancel token、Output、预响应缓存和丢弃台账。`RunCommandResponse.executionId` 只建立 Execution 认证，不代表 Started；starting 只能由认证 `Started` 进入 running，Output、计时器、按钮和 IPC resolve 都不能推断 Lifecycle。
+- Channel 契约：Channel 只能在 `runCommandBlock` 请求中创建。Run Promise 返回前的事件先进入有界缓存，不得显示；取得响应 ID 后只按到达顺序重放该 ID、当前 generation、严格递增 sequence 的事件。错误 ID、旧 generation、重复/倒序 sequence、终态后事件全部丢弃；第一个认证 `Finished`、`Cancelled` 或 `Failed` 是唯一终态。终态可从 starting/running/cancelling 到达，`Started` 不得把 cancelling 倒退为 running。Channel 或 Run 迟到 callback 在卸载或下一次执行后不得写回。
+- Cancel 契约：只要当前响应 Execution ID 已认证、阶段为 starting/running、尚无 Cancel pending 且未接受终态，即可按 Execution ID 请求 Cancel；绝不提交 PID。Cancel 同步 token 防双击；返回 `state=cancelling` 才推进 cancelling，`state=null` 不伪造终态，`accepted=false/state=cancelling` 按幂等事实保持 cancelling。Cancel resolve/reject 落地前再次检查 run generation、Execution ID、Cancel token 和无终态；Cancel 失败保留 Lifecycle 并允许重试，终态或新执行后到达的旧结果不得污染界面。
+- 错误与恢复契约：任一 Run rejection 都消费并清除可执行和展示 Preview、失效当前 run generation 与缓存、回到 configuring，并且不得伪造 ExecutionResult；`STALE_PREVIEW`、`REVISION_CONFLICT` 和 `COMMAND_BLOCK_NOT_FOUND` 必须要求重新 Preview，其中 Definition 身份错误重新加载 Summary/Details。运行活跃期间锁定搜索、命令选择、全部表单、Picker 和移除动作；Browser 无 Tauri 时 Gateway/Picker/窗口动作安全降级。
+- Output 与结果契约：Output 继续作为不可信 React 文本，不解析 HTML/Markdown、URL、ANSI/OSC。Buffer 同时限制最多 512 KiB 与 2048 个非空 Chunk，超限淘汰最旧内容并累计字节；空 fragment 不创建 DOM。预响应缓存除事件数外也限制 fragment 总数，淘汰时优先保留 Lifecycle 事件并把匹配 Execution 的丢弃字节记入台账。`Finished` 只显示“任务自然结束”和 Exit Code，非零退出也不得提前解释为业务失败；`Cancelled` 只表示 Lifecycle 取消，`Failed` 只表示 Execution 内部失败，本原子不产生 Outcome。
+- 遗留接缝与验证 Definition：删除生产与测试中的 `FixedExecutionGateway`、`StartFixedExecutionResponse`、`createFixedExecutionGateway` 和 `startFixedExecution`；统一 Workspace 只使用 `CommandExecutionGateway` 的 list/get/preview/run/cancel。不得改变两个已发布回显 Definition，也不得在默认开发或 release 注册等待命令。为取得真实 React → Typed IPC → Rust Core Cancel 垂直证据，允许新增非默认 Cargo feature `ui-validation`：只有显式启用该 feature 的验证构建才编译并注册一个固定、无参数、最多 5 秒 `Start-Sleep` 的验证 Definition；它复用同一 list/get/preview/run/cancel 契约，不增加 IPC，不读取环境变量，不持久化，不进入默认/release 列表。自动测试必须证明默认 registry 仍只有两个正式 Built-in，验证 feature 关闭时验证 ID 不可读取；发布与普通 `dev.cmd` 不启用该 feature。
+- 测试安全化：在运行完整 Rust 门禁前，把现有 Job 子进程测试中的 `ping -t`、`Set-Content` 和 60 秒等待改为最多 5 秒的受控 PowerShell `Start-Sleep`；子 PID 通过 stdout 读取，不让测试命令写文件。源级审计只允许两个正式 Built-in 的字面参数回显、最多约 5 秒短等待和受控 Exit Code；禁止删除、移动、覆盖、网络、注册表及用户脚本。
+- 自动测试要求：精确 Run 快照及深复制、配置或 Definition generation 失效、同步双击 Run、活跃期全锁、预响应缓存、Execution ID/sequence/generation/唯一终态认证、starting 早期 Cancel、Cancel 双击/幂等/null/失败/终态竞态、Started 不倒退 cancelling、非零自然结束不推断 Outcome、finished 后重新 Preview、Output 字节/Chunk/预响应 fragment 双上限、空 fragment、纯文本、卸载、Browser 降级和遗留接缝零结果。Run rejection 使用表驱动覆盖所有当前可达公开码：`COMMAND_BLOCK_NOT_FOUND`、`REVISION_CONFLICT`、`VALIDATION_FAILED`、`INVALID_TEMPLATE`、`UNSUPPORTED_RUNNER`、`RUNNER_UNAVAILABLE`、`INTERNAL_CONTRACT`、`STALE_PREVIEW`、`ARTIFACT_PREPARATION_FAILED`、`PROCESS_START_FAILED`、`EXECUTION_START_FAILED`，并覆盖未知拒绝收敛为 `IPC_FAILED`；每项都断言一次性授权和展示 Preview 已清除、run generation/预响应缓存失效、无伪造 Result、迟到 Channel 不落地，另断言前两个身份错误重新加载 Summary/Details，`STALE_PREVIEW` 只要求重新 Preview。既有 Rust stale/revision/validation 零副作用、两 Runner 字符矩阵、Channel 断开、Cancel/自然退出竞态、Job 整树终止、Core 强退、慢消费者和 Artifact 完整性继续通过。
+- 真实宿主与证据：默认构建分别运行两个正式无破坏回显 Built-in；Text 覆盖中文、日文、Emoji、单双引号、反斜杠和 Shell 特殊字符，其他五类参数覆盖边界值与 Windows 临时测试目录。验证 Preview 摘要/大小/截断/完整 Hash、Execution UUID、stdout 精确顺序、`stderr` 明确为空、唯一 Finished、Exit Code 与测试目录未变化。另用显式 `ui-validation` 验证构建在同一真实 Workspace 中选择短等待 Definition，完成 Preview → Run → UI 点击 Cancel → cancelling/唯一 Cancelled，证明新通用 React/Gateway/IPC/Manager/Job 垂直链；Windows Job 集成测试继续证明整棵进程树终止。验收后退出验证构建并用默认 `dev.cmd -Detached` 重新启动，确认列表恢复为两个正式 Built-in；文档区分默认双 Runner 证据、验证 feature Cancel 证据和底层整树证据。另检查 1487、980、680 三档、键盘焦点、单层标题栏和控制台。
+- 文档与验收：在唯一 `docs/testing/测试与验收.md` 中提供 `ID | 操作/输入 | 预期 | 实际 | 证据` 完整清单；修正技术设计中当前 IPC/Channel 与未来 Outcome/health 的事实边界；同步 `性能设计.md`，明确 CMD-02 当前实现是 512 KiB、2048 个非空 Chunk 与预响应 event/fragment 双上限的直接渲染硬边界，不能描述成约 5 MiB 或已经具备虚拟化/长期高频性能，虚拟化 Viewer 保留为后续性能单元和发布门禁；更新 `design-qa.md`、父计划、工作台、阶段记录和 `AGENTS.md`。CMD-02 全部证据完成后才把计划标为 done，并回到等待用户检查，不自动进入 CMD-03 或永久删除。
+- 验证命令：相关 Vitest、`pnpm check:web`、安全化后的 `pnpm check`、限定 Windows 集成测试、默认 `dev.cmd -Detached` Tauri 双 Runner 流程，以及显式 Cargo `ui-validation` feature 的一次真实短等待 Cancel 流程；执行响应式/键盘/控制台检查。验收后精确清理本项目验证进程并用默认 `dev.cmd -Detached` 重新启动供用户检查。普通修改不运行 GUI Probe 或完整 Bundle。
 - 预期结果：CMD-02 在当前真实 Windows/Tauri 完成，PowerShell/CMD 都只执行无副作用内置任务。
 - 完成判定：最终测试清单逐项记录操作、预期与实际；所有自动和真实宿主门禁通过；仓库文档只描述已证实行为。
 - 交付给下一原子的输出：供 `CMD-03` 使用的 Typed Preview/Run/Execution 基础。
@@ -291,3 +299,13 @@ CMD02-TEMPLATE-01┘                                      │
 - 风险等级：L3
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(ui): [CMD02-UI-RUN-01] 完成类型化命令宿主闭环`
+
+### 执行记录
+
+- 实际交付：统一 Command Workspace 只保留 `CommandExecutionGateway` 的 list/get/preview/run/cancel 五个业务 IPC；Run 仅从已消费的不可变 `ConfirmedPreview` 构造带 `executionSpecHash` 的请求，并在任何 `await` 前同步消费一次性授权。Run 响应只认证 Execution ID，Started、Output、Finished、Cancelled 和 Failed 均由当前 run generation 的 per-run Channel 推进；错误 ID、旧 generation、重复或倒序 sequence、终态后事件与卸载后回调全部丢弃。
+- 状态与取消：同一提交内双击只创建一个 Channel 和一次 Run；运行活跃时命令切换、搜索、全部参数动作和 Picker 均锁定。Starting 取得响应 UUID 后即可 Cancel；双击、幂等、`state=null`、失败、迟到响应和终态竞态均不伪造或倒退 Lifecycle，Cancel 从不提交 PID。
+- Output 与结果：前端只按不可信文本显示 Output，当前 Buffer 最多保留 512 KiB 与 2048 个非空 Chunk；预响应缓存同时限制 2048 个事件、2048 个非空 Fragment 与 512 KiB，超限优先淘汰 Output 并记录丢弃字节。当前为有界直接渲染，不包含虚拟化 Viewer 或持久日志；Finished 只显示自然结束、原始 Exit Code 和耗时，本原子不产生 Outcome 或健康状态。
+- 自动验证：完整前端回归为 7 个文件、91 项测试，覆盖一次性 Run、全部公开 Run 拒绝、Channel 身份和 sequence、唯一终态、Cancel 竞态、Output 三重上限、纯文本与 Browser 降级；两套 TypeScript 检查、Vite production build、安全化后的完整 Rust 门禁、`ui-validation` feature、生成契约漂移检查、combined features/all targets strict Clippy、格式和 diff 检查均通过。默认 Registry 严格只有两个正式 Built-in，验证 ID 在 feature 关闭时不可读取；旧 Fixed Execution 四个标识、危险测试命令和新增凭据扫描结果均为零。
+- 真实宿主验证：默认真实 Windows/Tauri 分别运行 PowerShell 与 CMD 六类参数回显 Built-in；中文、日文、Emoji、单双引号、反斜杠和 Shell 特殊字符均保持字面输出，两次执行都取得有效 Execution UUID、精确 stdout、空 stderr、唯一 Finished、Exit Code 0，专用测试目录前后未变化。显式 `ui-validation` 构建在同一 Workspace 完成无参数 Preview → Run → UI Cancel → Cancelling → 唯一 Cancelled；退出验证构建后，默认应用列表恢复为两个正式 Built-in。
+- 界面与安全：`1487`、`980`、`680` 三档响应式、键盘焦点与单层 Windows 标题栏检查通过。所有自动和真实命令只使用字面回显、参数展示、受控 Exit Code 与最多 5 秒 `Start-Sleep`；没有执行删除、移动、覆盖、网络、注册表、系统配置或用户脚本，Job 子 PID 通过 stdout 观察而不写诊断文件。本轮未取得独立 WebView console attachment，因此不声称 fresh console=0；真实流程没有可见错误提示或 Vite overlay，自动回归与生产构建通过。
+- 复核与偏差：最终 L3 限定范围复核为 `PASS`。没有产品范围偏差；非默认 `ui-validation` 只用于真实 Cancel 证据，不进入默认开发、release、环境变量或持久化契约。

@@ -4,7 +4,7 @@
 
 - 计划 ID：SCOPE-CMDBOX-001
 - 类型：product-scope
-- 修订版本：2
+- 修订版本：3
 - 状态：active
 - 创建基线：不适用
 
@@ -30,7 +30,7 @@
 - Rust Core 是进程、模板、安全、数据库和日志的信任边界。
 - React 只通过明确 Typed IPC 发起业务操作，不暴露任意进程执行或 PID 终止入口。
 - Execution 生命周期事件必须有 Execution ID 和可排序 sequence。
-- 大量 Output 采用聚合、Batch、Tauri Channel、有界内存和虚拟化显示。
+- 大量 Output 采用聚合、Batch、Tauri Channel 和有界内存；CMD-02 当前使用 512 KiB、2048 非空 Chunk 的有界直接渲染，虚拟化 Viewer 留待后续性能单元和发布门禁。
 - Windows 文件系统和 Job Object 行为必须在真实 Windows 环境验证。
 - 每个声称用户价值的单元都必须通过最小真实 Tauri 垂直路径验收，即从 React UI 经 Typed IPC 到 Rust Core，再观察用户可见结果或系统最终状态；`CMD-08` 只负责体验整合，不能作为此前单元的首次全链路接入。
 - 当前实施顺序采用后端先行：可先形成独立验证的 Rust 后端基础，但不得据此把对应产品单元标为 `done`；任何前端产品实现开始前必须先完成界面原型设计并取得用户确认。
@@ -81,16 +81,17 @@
 
 ## CMD-02 通过 Typed Parameter 预览并执行 PowerShell/CMD 命令
 
-- 状态：in_progress
+- 状态：done
 - 用户或业务价值：用户只填写业务参数即可得到准确、可读且不会因引号错误改变语义的命令 Preview，并以声明的 PowerShell 或 CMD Runner 实际执行。
 - 参与者：Windows 用户、Command Block 作者。
 - 触发与前置条件：Execution Core 可以运行固定脚本；存在内置 Command Block Draft。
-- 预期结果：Text、Number、Boolean、Select、Folder 和 Folders 参数经验证与对应 Shell Serializer 生成 `RenderedExecution`；Preview Hash 覆盖 Command Block ID、revision、Runner、Runner options、完整渲染产物、规范化参数、工作目录、配置环境和安全策略版本。Run 重新读取当前 Command Block 与配置、重新验证、重新渲染并比较完整 Spec Hash，匹配后才通过最小真实 Tauri 路径启动声明的 PowerShell 或 CMD 一次性任务。
+- 预期结果：Text、Number、Boolean、Select、Folder 和 Folders 参数经验证与对应 Shell Serializer 生成 `RenderedExecution`；`executionSpecHash` 覆盖 Command Block ID、revision、Runner、Runner options、完整渲染产物、规范化参数、工作目录、配置环境和安全策略版本。Run 重新读取当前 Command Block 与配置、重新验证、重新渲染并比较完整 Execution Spec Hash，匹配后才通过最小真实 Tauri 路径启动声明的 PowerShell 或 CMD 一次性任务。
 - 验收场景：对 PowerShell 和 CMD 分别使用中文、空格、单引号、多路径和条件/循环模板完成 Preview 与真实执行；逐项改变参数、Command revision、Runner、Runner options、工作目录、配置环境或安全策略版本后使用旧 Hash，系统均拒绝启动；CMD 必须在真实 Windows 中通过中文及特殊字符编码验收，未通过前不得宣称 CMD 支持完成。
 - 来源需求或验收条件：参数表单、Multi Folder、Preview、escaping；AC-02、AC-03。
 - 明确不包含：持久化 Command、用户自定义 Raw Parameter、破坏性路径策略、完整编辑器。
 - 依赖：CMD-01。
 - 风险或假设：不能把 Preview 展示截断误用为完整执行内容；模板解析与参数序列化必须位于 Rust Core；CMD 编码属于本单元完成门禁而不是以后补做的发布细节。
+- 完成证据：九个原子全部完成；前端 7 个文件、91 项测试通过；默认真实 Tauri 中 PowerShell/CMD 均完成六类参数回显、空 stderr、唯一 Finished 与 Exit Code 0；显式 `ui-validation` 短等待完成 UI Cancel 和唯一 Cancelled；三档响应式、单层标题栏、键盘及无危险命令检查通过。本轮独立 WebView console attachment 未取得，真实流程无可见错误提示或 Vite overlay，该限制已在验收清单单列。
 
 ## CMD-03 按 Command Outcome Policy 解释执行结果
 
@@ -112,7 +113,7 @@
 - 参与者：Windows 用户。
 - 触发与前置条件：用户在真实 Tauri 界面选择一个或多个绝对目录并完成 Preview；CMD-01、CMD-02、CMD-03 已通过。
 - 预期结果：系统规范化并折叠路径集合，拦截关键路径和不明确 Reparse Point，绑定 Path Fingerprint；Run 二次验证后启动唯一的破坏性 Execution，展示实时输出并返回 Success、Partial Failure 或 Failure。应用仍在运行时取消不暗示回滚，目标级结果区分已确认删除、失败、尚未开始和无法确认；Core 强退在本单元只承诺终止整棵进程树，不承诺重启后恢复结果。
-- 验收场景：通过真实 Tauri 路径对普通多目录完成删除；对磁盘根目录和系统目录阻断；对 Preview 后被替换的目录拒绝；对部分被占用目标返回 Partial Failure；对同一 Preview Hash 的双击和并发 Run 只允许一个外部删除进程；对 A 已删除、B 处理中、C 未开始时 Cancel 以及接近自然退出的 Cancel 竞态，终止整棵进程树并显示当前可证明的目标级结果；Core 强退场景只验收整树清理，并明确不把退出表达为无副作用或自动回滚。重启后的可恢复目标证据由 `CMD-07` 验收。
+- 验收场景：通过真实 Tauri 路径对普通多目录完成删除；对磁盘根目录和系统目录阻断；对 Preview 后被替换的目录拒绝；对部分被占用目标返回 Partial Failure；对同一已确认 `executionSpecHash` 的双击和并发 Run 只允许一个外部删除进程；对 A 已删除、B 处理中、C 未开始时 Cancel 以及接近自然退出的 Cancel 竞态，终止整棵进程树并显示当前可证明的目标级结果；Core 强退场景只验收整树清理，并明确不把退出表达为无副作用或自动回滚。重启后的可恢复目标证据由 `CMD-07` 验收。
 - 来源需求或验收条件：Hero Delete、安全评审和性能评审；AC-03、AC-04、AC-05、AC-06、AC-09。
 - 明确不包含：回收站恢复、递归安全扫描、删除链接本身的专用命令、复制和移动 UI。
 - 依赖：CMD-01、CMD-02、CMD-03。
@@ -172,9 +173,9 @@
 
 # 下一步
 
-- 最近完成：`CMD-01`；`ATOMIC-CMD-01-UI-001` 的四个原子均已验证并同步远端。
-- 当前进行中：`CMD-02`，按 `ATOMIC-CMD-02-001` 连续实现 Typed Parameter、Preview Hash、PowerShell/CMD Serializer 和最小真实 UI 路径。
-- 当前停止条件：出现会改变产品结果、需要危险命令或无法在无副作用验收中证明的阻塞。
+- 最近完成：`CMD-02`；`ATOMIC-CMD-02-001` 的九个原子、自动回归与无副作用真实宿主验收均已完成。
+- 当前状态：等待用户检查 `CMD-02`；当前没有进行中的代码交付单元。
+- 下一推荐单元：`CMD-03`，只有用户明确授权后才进入规划或实现；不根据本计划自动恢复开发。
 
 # 计划变更记录
 
@@ -182,3 +183,4 @@
 |---|---|---|
 | 1 | 首次建立 CmdBox MVP 产品拆分 | 将网页版 M0–M5 和最终产品边界转成可独立验收的产品单元 |
 | 2 | 增加后端先行和前端原型确认门禁 | 用户授权先开发后端，并要求前端实现前先完成原型以避免返工 |
+| 3 | 将 CMD-02 标记为完成并记录当前 Output 边界 | 九个原子、双 Runner、短等待 Cancel、响应式与安全验收已通过；项目进入用户检查关口 |

@@ -813,21 +813,19 @@ mod tests {
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::fs;
-    use std::io::Read;
+    use std::io::{BufRead, BufReader, Read};
     use std::path::Path;
-    use std::thread;
-    use std::time::{Duration, Instant};
     use std::{
         io,
         sync::atomic::{AtomicU32, Ordering},
     };
 
-    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
 
     use super::{
         build_unicode_environment_block, ManagedProcess, ManagedProcessError,
-        ManagedProcessOperation, PROCESS_SYNCHRONIZE_ACCESS,
+        ManagedProcessOperation, OwnedHandle, PROCESS_SYNCHRONIZE_ACCESS,
     };
     use crate::execution::artifact::{ArtifactError, MaterializedScript, RenderedScript};
     use crate::process::windows::runner::{
@@ -847,34 +845,67 @@ mod tests {
         runner.process_launch(artifact, working_directory)
     }
 
-    /// 在限定时间内等待测试脚本写出子进程 PID。
-    fn wait_for_pid_file(path: &Path) -> u32 {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if let Ok(value) = fs::read_to_string(path) {
-                if let Ok(pid) = value.trim().parse() {
-                    return pid;
-                }
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-        panic!("测试脚本未在期限内写出子进程 PID：{}", path.display());
+    /// 从受管 stdout 首行读取短等待子进程 PID，不通过测试脚本写入额外文件。
+    fn read_child_pid(stdout: std::fs::File) -> u32 {
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("应从受管 stdout 读取子进程 PID");
+        line.trim()
+            .strip_prefix("child-pid:")
+            .expect("PowerShell 应返回稳定的子进程 PID 前缀")
+            .parse()
+            .expect("子进程 PID 应为 u32")
     }
 
-    /// 等待指定 PID 对应的进程退出；进程已经不存在也视为成功。
-    fn wait_until_process_exits(pid: u32) {
-        // SAFETY: 只请求同步等待权限；返回空句柄表示进程已经退出或不可访问，本测试目标已满足。
+    /// 以同步等待权限打开指定进程，供终止前后使用同一内核句柄观测。
+    fn open_process_for_synchronization(pid: u32) -> OwnedHandle {
+        // SAFETY: 只请求同步等待权限；成功句柄立即交给 OwnedHandle 唯一管理。
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE_ACCESS, 0, pid) };
+        if handle.is_null() {
+            let source = io::Error::last_os_error();
+            panic!("打开 PID {pid} 的 PROCESS_SYNCHRONIZE 句柄失败：{source}");
+        }
+        OwnedHandle::new(handle)
+    }
+
+    /// 使用零超时等待确认进程句柄在终止请求前仍未触发。
+    fn assert_process_is_running(handle: &OwnedHandle, pid: u32) {
+        // SAFETY: OwnedHandle 在调用期间保持有效，零超时只读取当前信号状态。
+        let wait_result = unsafe { WaitForSingleObject(handle.raw(), 0) };
+        if wait_result == WAIT_FAILED {
+            let source = io::Error::last_os_error();
+            panic!("检查 PID {pid} 运行状态失败：{source}");
+        }
+        assert_eq!(
+            wait_result, WAIT_TIMEOUT,
+            "PID {pid} 在 TerminateJobObject 前已经退出"
+        );
+    }
+
+    /// 通过预先保留的句柄在指定毫秒上限内等待进程退出。
+    fn wait_for_open_process_exit(handle: &OwnedHandle, pid: u32, timeout_ms: u32) {
+        // SAFETY: OwnedHandle 在等待期间保持有效，且该句柄具有 PROCESS_SYNCHRONIZE 权限。
+        let wait_result = unsafe { WaitForSingleObject(handle.raw(), timeout_ms) };
+        if wait_result == WAIT_FAILED {
+            let source = io::Error::last_os_error();
+            panic!("等待 PID {pid} 退出失败：{source}");
+        }
+        assert_eq!(
+            wait_result, WAIT_OBJECT_0,
+            "PID {pid} 未在 {timeout_ms}ms 内退出，等待结果为 {wait_result}"
+        );
+    }
+
+    /// 确认失败清理后的 PID 已消失，或等待尚可打开的进程退出。
+    fn wait_until_process_is_gone(pid: u32, timeout_ms: u32) {
+        // SAFETY: 只请求同步等待权限；此辅助仅用于启动失败后的清理断言，无句柄表示 PID 已不存在。
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE_ACCESS, 0, pid) };
         if handle.is_null() {
             return;
         }
-        // SAFETY: OpenProcess 返回的句柄有效，等待后由当前函数关闭一次。
-        let wait_result = unsafe { WaitForSingleObject(handle, 10_000) };
-        unsafe {
-            CloseHandle(handle);
-        }
-        assert_ne!(wait_result, WAIT_TIMEOUT, "PID {pid} 未按期退出");
-        assert_eq!(wait_result, WAIT_OBJECT_0, "PID {pid} 等待失败");
+        let handle = OwnedHandle::new(handle);
+        wait_for_open_process_exit(&handle, pid, timeout_ms);
     }
 
     /// 验证 Exit Code 0 的固定脚本可自然结束。
@@ -916,30 +947,36 @@ mod tests {
     /// 验证 TerminateJobObject 会同时终止 PowerShell 根进程和它创建的子进程。
     #[test]
     fn terminate_job_stops_root_and_child_process() {
-        let pid_file =
-            std::env::temp_dir().join(format!("cmdbox-child-{}.pid", uuid::Uuid::new_v4()));
-        let escaped_pid_file = pid_file.to_string_lossy().replace('\'', "''");
-        let script = format!(
-            "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d /c ping -t 127.0.0.1' -PassThru; Set-Content -LiteralPath '{escaped_pid_file}' -Value $child.Id; Wait-Process -Id $child.Id"
-        );
+        let script = "$utf8 = New-Object System.Text.UTF8Encoding($false); [Console]::OutputEncoding = $utf8; $child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 5') -PassThru; [Console]::Out.WriteLine(\"child-pid:$($child.Id)\"); Wait-Process -Id $child.Id";
         let working_directory = safe_working_directory();
-        let launch = powershell_launch(&script, &working_directory);
-        let process = ManagedProcess::spawn(launch).expect("应启动受管进程");
+        let launch = powershell_launch(script, &working_directory);
+        let mut prepared = ManagedProcess::prepare(launch).expect("应准备受管进程");
+        let output = prepared.take_output().expect("应取得受管 stdout/stderr");
+        let (stdout, _stderr) = output.into_readers();
+        let process = prepared.resume().expect("应恢复受管进程");
         let root_pid = process.process_id();
-        let child_pid = wait_for_pid_file(&pid_file);
+        let child_pid = read_child_pid(stdout);
+        let root_handle = open_process_for_synchronization(root_pid);
+        let child_handle = open_process_for_synchronization(child_pid);
+
+        assert_process_is_running(&root_handle, root_pid);
+        assert_process_is_running(&child_handle, child_pid);
 
         process.terminate_job().expect("应接受整树终止请求");
-        let _exit_code = process.wait().expect("终止后应确认根进程结束");
-        wait_until_process_exits(root_pid);
-        wait_until_process_exits(child_pid);
-        let _ = fs::remove_file(pid_file);
+        // 两秒上限显著短于子进程的五秒自然等待；若 Job 只杀根进程，child 断言必须失败。
+        wait_for_open_process_exit(&root_handle, root_pid, 2_000);
+        wait_for_open_process_exit(&child_handle, child_pid, 2_000);
+        let _exit_code = process.wait().expect("终止后应确认并回收根进程");
+        // 两个观测句柄保留到所有等待完成，此处 Drop 各自唯一调用 CloseHandle。
+        drop(root_handle);
+        drop(child_handle);
     }
 
     /// 验证 Job 分配失败时启动守卫会终止尚未受管的挂起 PowerShell，不留下孤立 PID。
     #[test]
     fn assign_failure_terminates_pending_suspended_process() {
         let working_directory = safe_working_directory();
-        let launch = powershell_launch("Start-Sleep -Seconds 60", &working_directory);
+        let launch = powershell_launch("Start-Sleep -Seconds 5", &working_directory);
         let captured_pid = AtomicU32::new(0);
 
         let result =
@@ -960,7 +997,7 @@ mod tests {
         ));
         let pid = captured_pid.load(Ordering::SeqCst);
         assert_ne!(pid, 0, "失败注入前应取得 CreateProcessW 返回的 PID");
-        wait_until_process_exits(pid);
+        wait_until_process_is_gone(pid, 10_000);
     }
 
     /// 验证完全替换环境按 ASCII 大小写不敏感顺序编码并以双 NUL 结束。

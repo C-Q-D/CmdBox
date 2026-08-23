@@ -33,7 +33,8 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 - 日常小步验证：`pnpm check:fast`；提交前完整验证：`pnpm check`；完整 `pnpm tauri build` 只用于里程碑或发布。
 - `src/` 修改走 Vite HMR，`src-tauri/src/` 修改走 Tauri Watch + Cargo Incremental；不要为普通源码修改手工重建 Bundle。
 - 开发命令、依赖指纹、日志、故障处理和实测耗时统一见[开发环境与日常开发](docs/development/开发环境与日常开发.md)。
-- `CMD-01` 固定无破坏任务闭环已实现并实测。`CMD-02` 已完成 8/9 个原子：Rust Core 已具备六类 Typed Parameter、受限模板、可信 Preview/Run 复验、PowerShell/CMD 确定执行，前端已接入真实命令索引、统一六类参数表单和可信 Preview 状态；通用 Run/Cancel/Output 闭环仍在实现。永久删除、History 和持久化尚未实现。
+- `CMD-01` 固定无破坏任务闭环与 `CMD-02` 类型化预览和执行均已实现并实测。`CMD-02` 的 9/9 个原子已经完成：默认应用提供两个无破坏回显 Built-in，统一 Command Workspace 已接通六类 Typed Parameter、可信 `executionSpecHash`、一次性 Run 授权、per-run Channel、Output、Cancel 与唯一终态；91 项前端测试、PowerShell/CMD 真实回显、显式短等待 Cancel、三档响应式和无危险命令验收均通过。
+- `CMD-02` 当前只表达 Execution Lifecycle、原始 Exit Code、耗时与有界实时 Output；Outcome、持久日志、虚拟化 Viewer、History、持久化和永久删除仍未实现。前端实时 Output 当前使用 512 KiB、2048 个非空 Chunk 的有界直接渲染。
 
 ## 不得破坏的全局约束
 
@@ -65,7 +66,7 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 |---|---|---|
 | 领域 | [领域语言](CONTEXT.md) | 项目专有术语及应避免的混用名称 |
 | 视觉 | [Command Workspace 视觉原型](docs/design/Command-Workspace-视觉原型.png) | 用户确认的 `editorial-field-notes` 方案 1，前端视觉实现真值 |
-| 视觉证据 | [Command Workspace 实现截图](docs/design/Command-Workspace-implementation-ready.png) | `1487 × 1058` Ready 状态浏览器实现证据 |
+| 视觉证据 | [Command Workspace 实现截图](docs/design/Command-Workspace-implementation-ready.png) | `1487 × 1058` 默认 Tauri Ready 状态实现证据 |
 | 视觉验收 | [Command Workspace 视觉 QA](design-qa.md) | 源图、实现、交互、响应式与可访问性对照记录 |
 | 项目状态 | [项目工作台](docs/ai-project/项目工作台.md) | 当前阶段、授权、风险、验收摘要和恢复入口 |
 | 项目状态 | [项目阶段记录](docs/ai-project/项目阶段记录.md) | 阶段、关口和产物台账 |
@@ -77,12 +78,13 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 | 活动计划 | [CmdBox MVP 产品拆分](docs/开发计划/产品拆分-CmdBox-MVP.md) | 可独立验收的交付单元和依赖 |
 | 已完成计划 | [开发环境与项目骨架原子计划](docs/开发计划/原子开发计划-开发环境与项目骨架.md) | 已验证的开发环境、Docker 和 Windows 主机入口准备记录 |
 | 已完成计划 | [Command Workspace 前端视觉原型计划](docs/开发计划/原子开发计划-Command-Workspace前端视觉原型.md) | 已验证的无副作用 React 原型、交互与视觉 QA 记录 |
+| 已完成计划 | [CMD-02 类型化预览与执行原子计划](docs/开发计划/原子开发计划-CMD-02类型化预览与执行.md) | 已验证的六类参数、可信 Preview、PowerShell/CMD 与统一宿主执行闭环记录 |
 | 验收 | [测试与验收](docs/testing/测试与验收.md) | 实现及发布必须取得的验证证据 |
 
 ## 实现与文档同步
 
 - 用户授权实现后，从活动计划中选择依赖已满足的推荐单元，不按前端、Rust、数据库横向拆成无法验收的半成品。
-- `CMD-01` 已完成；用户已授权连续实现 `CMD-02` 并允许在项目内 `.worktree/` 并行。当前活动原子为最后一个 `CMD02-UI-RUN-01`；真实命令测试继续只允许回显、参数展示和短等待。
+- `CMD-01` 与 `CMD-02` 已完成；当前没有进行中的代码原子，项目停在 `CMD-02` 用户检查关口。未经用户新的明确授权，不进入 `CMD-03`、永久删除或持久化实现。后续真实命令测试仍只允许回显、参数展示和短等待。
 - 每个交付单元进入实现前，先规划最终用户流程和可观察结果。
 - 实际实现、自动测试和真实宿主验证完成后，更新测试证据、项目工作台、阶段记录和计划单元状态。
 - GitHub 公开仓库为 `https://github.com/C-Q-D/CmdBox`；每次完成有效改动并形成独立提交后，立即推送当前分支到对应远端跟踪分支。推送前必须完成适用验证并检查本次改动不含凭据或私有数据。
@@ -95,6 +97,5 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 | 计划 ID | 类型 | 文档 |
 |---|---|---|
 | SCOPE-CMDBOX-001 | 产品拆分 | [CmdBox MVP 产品拆分](docs/开发计划/产品拆分-CmdBox-MVP.md) |
-| ATOMIC-CMD-02-001 | 原子开发 | [CMD-02 类型化预览与执行原子计划](docs/开发计划/原子开发计划-CMD-02类型化预览与执行.md) |
 
 <!-- codex-plan-index:end -->

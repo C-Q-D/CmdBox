@@ -10,7 +10,11 @@ import type {
   ParameterValue,
   PreviewCommandResponse,
 } from "../../generated/contracts";
-import { acceptPreviewResponse, createPreviewAttempt } from "./preview-state";
+import {
+  acceptPreviewResponse,
+  createPreviewAttempt,
+  createVerifyRunRequest,
+} from "./preview-state";
 
 /** 创建不含参数 Schema 的最小 Definition；快照测试直接传入完整 JSON 值。 */
 function createDefinition(): CommandBlockDetails {
@@ -147,6 +151,36 @@ describe("可信 Preview 快照", function describePreviewState() {
         acceptance.confirmedPreview.response.safety.warnings[0],
       ),
     ).toBe(true);
+  });
+
+  it("只从 ConfirmedPreview 再次深复制冻结通用 Run 请求", function isolateRunRequest() {
+    const attempt = createPreviewAttempt(createDefinition(), 11, 23, {
+      nested: ["alpha", { child: [null, true, 3] }],
+    });
+    const acceptance = acceptPreviewResponse(attempt, createResponse());
+    if (acceptance.kind !== "confirmed") {
+      throw new Error("测试预期形成 ConfirmedPreview");
+    }
+
+    const request = createVerifyRunRequest(acceptance.confirmedPreview);
+
+    expect(request).toEqual({
+      commandBlockId: "builtin.preview-state",
+      expectedRevision: 7,
+      parameterValues: {
+        nested: ["alpha", { child: [null, true, 3] }],
+      },
+      executionSpecHash: "b".repeat(64),
+    });
+    expect(request.parameterValues).not.toBe(
+      acceptance.confirmedPreview.parameterValues,
+    );
+    expect(request.parameterValues.nested).not.toBe(
+      acceptance.confirmedPreview.parameterValues.nested,
+    );
+    expect(Object.isFrozen(request)).toBe(true);
+    expect(Object.isFrozen(request.parameterValues)).toBe(true);
+    expect(Object.isFrozen(request.parameterValues.nested)).toBe(true);
   });
 
   it("拒绝错误身份并让 blocked 只保留展示证据", function enforceIdentityAndBlockedSafety() {

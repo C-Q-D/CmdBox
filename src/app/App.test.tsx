@@ -8,9 +8,9 @@ import type {
   CommandBlockSummary,
   CommandExecutionGateway,
   ExecutionStreamEvent,
-  FixedExecutionGateway,
   PreviewCommandRequest,
   PreviewCommandResponse,
+  VerifyRunRequest,
 } from "../features/command-workspace/execution-gateway";
 import type { DesktopWindowControls } from "../features/command-workspace/desktop-window-controls";
 import type { FolderPicker } from "../features/command-workspace/folder-picker";
@@ -33,72 +33,6 @@ function createDeferred<T>() {
     rejectPromise = reject;
   });
   return { promise, resolve: resolvePromise, reject: rejectPromise };
-}
-
-/** 创建可由测试主动推送后端事件的固定任务 Gateway。 */
-function createGatewayFixture(options?: { startFailure?: boolean; cancelFailure?: boolean; deferStart?: boolean; deferCancel?: boolean }) {
-  /** 固定测试 Execution UUID。 */
-  const executionId = "9be8ec5d-ef8c-4c2a-a7f5-12069b2ad555";
-  /** 最近一次 Run 注册的 Channel 回调。 */
-  let eventHandler: ((event: ExecutionStreamEvent) => void) | undefined;
-  /** 取消调用收到的 Execution UUID。 */
-  const cancelledExecutionIds: string[] = [];
-  /** 允许测试精确控制启动响应时序的解析器。 */
-  let resolveStartResponse: (() => void) | undefined;
-  /** 允许测试精确控制取消响应时序的解析器。 */
-  let resolveCancelResponse: (() => void) | undefined;
-  /** 可观察的无副作用 Gateway。 */
-  const gateway: FixedExecutionGateway = {
-    /** 保存 Channel 回调并返回固定启动响应。 */
-    async startFixedExecution(onEvent) {
-      if (options?.startFailure) {
-        throw { code: "PROCESS_START_FAILED", message: "无法启动固定 PowerShell 任务" };
-      }
-      eventHandler = onEvent;
-      if (options?.deferStart) {
-        await new Promise<void>((resolve) => {
-          resolveStartResponse = resolve;
-        });
-      }
-      return { executionId };
-    },
-    /** 记录取消目标并返回 Rust 已进入 Cancelling 的事实。 */
-    async cancelExecution(targetExecutionId) {
-      cancelledExecutionIds.push(targetExecutionId);
-      if (options?.deferCancel) {
-        await new Promise<void>((resolve) => {
-          resolveCancelResponse = resolve;
-        });
-      }
-      if (options?.cancelFailure) {
-        throw { code: "CANCEL_FAILED", message: "无法取消当前 Execution" };
-      }
-      return { accepted: true, state: "cancelling" };
-    },
-  };
-  return {
-    /** 注入 Workspace 的 Gateway。 */
-    gateway,
-    /** 固定测试 Execution UUID。 */
-    executionId,
-    /** 取消调用记录。 */
-    cancelledExecutionIds,
-    /** 向当前 Channel 推送一个后端事件。 */
-    emit(event: ExecutionStreamEvent) {
-      if (!eventHandler) {
-        throw new Error("应先启动任务再推送事件");
-      }
-      eventHandler(event);
-    },
-    /** 释放被测试挂起的启动响应。 */
-    resolveStart() {
-      resolveStartResponse?.();
-    },
-    /** 释放被测试挂起的取消响应。 */
-    resolveCancel() {
-      resolveCancelResponse?.();
-    },
-  };
 }
 
 /** 两个真实 Gateway 摘要的稳定测试形状。 */
@@ -176,15 +110,34 @@ function createPreviewResponse(
   };
 }
 
-/** 创建通用 Gateway Fixture，可精确替换 Definition 集合与 Preview 时序。 */
-function createCommandGatewayFixture(options: {
+/** 通用 Gateway Fixture 的 Definition、Preview、Run 与 Cancel 时序选项。 */
+interface CommandGatewayFixtureOptions {
   /** 当前列表按 Rust 顺序返回的摘要。 */
   summaries?: CommandBlockSummary[];
   /** 当前摘要对应的详情。 */
   details?: Map<string, CommandBlockDetails>;
   /** 当前测试使用的 Preview 实现。 */
   previewCommandBlock?: CommandExecutionGateway["previewCommandBlock"];
-} = {}) {
+  /** Run 响应使用的测试 Execution UUID。 */
+  executionId?: string;
+  /** 是否挂起 Run 响应供测试先推送 Channel 事件。 */
+  deferRun?: boolean;
+  /** Run 响应需要抛出的公开或未知拒绝值。 */
+  runFailure?: unknown;
+  /** 是否挂起 Cancel 响应供测试制造终态竞态。 */
+  deferCancel?: boolean;
+  /** Cancel 响应需要抛出的拒绝值。 */
+  cancelFailure?: unknown;
+  /** Cancel 成功时返回的精确 Rust 事实。 */
+  cancelResponse?: Awaited<
+    ReturnType<CommandExecutionGateway["cancelExecution"]>
+  >;
+}
+
+/** 创建可主动推送 Channel 事件并控制 Run/Cancel 时序的通用 Gateway Fixture。 */
+function createCommandGatewayFixture(
+  options: CommandGatewayFixtureOptions = {},
+) {
   /** 当前 Fixture 返回的摘要集合。 */
   const summaries = options.summaries ?? commandSummaries;
   /** 当前两条 Summary 对应的 Details。 */
@@ -192,6 +145,19 @@ function createCommandGatewayFixture(options: {
       [commandSummaries[0].id, createCommandDetails(commandSummaries[0], "PowerShell 默认")],
       [commandSummaries[1].id, createCommandDetails(commandSummaries[1], "CMD 默认")],
     ]);
+  /** 当前 Run 响应使用的稳定 Execution UUID。 */
+  const executionId =
+    options.executionId ?? "9be8ec5d-ef8c-4c2a-a7f5-12069b2ad555";
+  /** 每个 Run 调用各自注册的专属 Channel 回调。 */
+  const eventHandlers: Array<(event: ExecutionStreamEvent) => void> = [];
+  /** Gateway 收到的每份深复制 Run 请求。 */
+  const runRequests: VerifyRunRequest[] = [];
+  /** Cancel 调用收到的可信 Execution UUID。 */
+  const cancelledExecutionIds: string[] = [];
+  /** 测试控制 Run 响应时序的外部解析器。 */
+  let resolveRunResponse: (() => void) | undefined;
+  /** 测试控制 Cancel 响应时序的外部解析器。 */
+  let resolveCancelResponse: (() => void) | undefined;
   /** 通用 Gateway 的可观察替身。 */
   const gateway: CommandExecutionGateway = {
     /** 返回两条真实摘要的防御性数组。 */
@@ -209,22 +175,68 @@ function createCommandGatewayFixture(options: {
           return createPreviewResponse(request);
         }),
     ),
-    /** Preview 流程不得提前调用通用 Run。 */
-    runCommandBlock: vi.fn(async () => {
-      throw new Error("Preview 流程不得调用通用 Run");
+    /** 保存本次结构化请求和专属 Channel，并按测试选项返回或拒绝。 */
+    runCommandBlock: vi.fn(async (request, onEvent) => {
+      runRequests.push(request);
+      eventHandlers.push(onEvent);
+      if (options.deferRun) {
+        await new Promise<void>((resolve) => {
+          resolveRunResponse = resolve;
+        });
+      }
+      if (options.runFailure !== undefined) {
+        throw options.runFailure;
+      }
+      return { executionId };
     }),
-    /** 通用取消不是当前固定 Execution Gateway 的职责。 */
-    cancelExecution: vi.fn(async () => ({ accepted: false, state: null })),
+    /** 记录目标 UUID，并按测试选项返回幂等事实、失败或挂起结果。 */
+    cancelExecution: vi.fn(async (targetExecutionId) => {
+      cancelledExecutionIds.push(targetExecutionId);
+      if (options.deferCancel) {
+        await new Promise<void>((resolve) => {
+          resolveCancelResponse = resolve;
+        });
+      }
+      if (options.cancelFailure !== undefined) {
+        throw options.cancelFailure;
+      }
+      return (
+        options.cancelResponse ?? { accepted: true, state: "cancelling" as const }
+      );
+    }),
   };
-  return { gateway, details };
+  return {
+    gateway,
+    details,
+    executionId,
+    runRequests,
+    eventHandlers,
+    cancelledExecutionIds,
+    /** 向指定 Run 的专属 Channel 推送一个后端事件。 */
+    emit(event: ExecutionStreamEvent, runIndex = eventHandlers.length - 1) {
+      const handler = eventHandlers[runIndex];
+      if (!handler) {
+        throw new Error("应先请求 Run 再推送事件");
+      }
+      handler(event);
+    },
+    /** 释放当前挂起的 Run 响应。 */
+    resolveRun() {
+      resolveRunResponse?.();
+    },
+    /** 释放当前挂起的 Cancel 响应。 */
+    resolveCancel() {
+      resolveCancelResponse?.();
+    },
+  };
 }
 
-/** 渲染同时带真实 Definition 与可选既有 Execution Gateway 的工作区。 */
-function renderConnectedWorkspace(gateway: FixedExecutionGateway | null = null) {
-  const commandFixture = createCommandGatewayFixture();
+/** 渲染只接入唯一通用 Gateway 的真实 Definition 工作区。 */
+function renderConnectedWorkspace(
+  commandFixture = createCommandGatewayFixture(),
+) {
   const rendered = render(
     <CommandWorkspace
-      gateway={gateway}
       commandGateway={commandFixture.gateway}
       folderPicker={null}
     />,
@@ -239,6 +251,19 @@ async function clickAvailablePreview(
   const button = await screen.findByRole("button", { name });
   await waitFor(() => expect(button).toHaveProperty("disabled", false));
   fireEvent.click(button);
+}
+
+/** 完成默认 Definition 的 Preview，并等待 Rust actionLabel 变为一次性 Run 动作。 */
+async function prepareConfirmedPreview(): Promise<HTMLButtonElement> {
+  await screen.findByRole("textbox", { name: /文本/ });
+  await clickAvailablePreview();
+  return screen.findByRole("button", { name: "执行当前命令" });
+}
+
+/** 完成 Preview 并点击一次通用 Run。 */
+async function startConfirmedExecution(): Promise<void> {
+  const runButton = await prepareConfirmedPreview();
+  fireEvent.click(runButton);
 }
 
 describe("CmdBox Command Workspace", function describeWorkspace() {
@@ -264,7 +289,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
       /** 记录普通关闭动作。 */
       close: vi.fn(async () => undefined),
     };
-    render(<CommandWorkspace gateway={null} windowControls={windowControls} />);
+    render(<CommandWorkspace windowControls={windowControls} />);
 
     fireEvent.click(screen.getByRole("button", { name: "最小化窗口" }));
     fireEvent.click(screen.getByRole("button", { name: "最大化或还原窗口" }));
@@ -322,7 +347,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     expect(screen.getByText("Write-Output 'PowerShell 默认'")).toBeDefined();
     expect(screen.getByText("38 bytes")).toBeDefined();
     expect(screen.getByText("a".repeat(64))).toBeDefined();
-    expect(screen.getByRole("button", { name: "执行当前命令" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "执行当前命令" })).toHaveProperty("disabled", false);
     expect(screen.queryByRole("region", { name: "Safety Decision" })).toBeNull();
     expect(commandFixture.gateway.runCommandBlock).not.toHaveBeenCalled();
   });
@@ -336,7 +361,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     });
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -361,7 +385,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     const fixture = createCommandGatewayFixture();
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -426,7 +449,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     });
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -505,7 +527,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     });
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -550,7 +571,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     });
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -593,7 +613,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
       });
       render(
         <CommandWorkspace
-          gateway={null}
           commandGateway={fixture.gateway}
           folderPicker={null}
         />,
@@ -625,7 +644,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     });
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -663,7 +681,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     });
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -694,7 +711,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     });
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -708,7 +724,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     expect(safety.textContent).toContain("Rust Safety 校验通过");
     expect(
       screen.getByRole("button", { name: "执行 Rust 已确认动作" }),
-    ).toHaveProperty("disabled", true);
+    ).toHaveProperty("disabled", false);
     expect(screen.getByText("Preview 已确认")).toBeDefined();
     expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
   });
@@ -763,7 +779,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     });
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -824,7 +839,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     });
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -866,7 +880,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     const rendered = render(
       <StrictMode>
         <CommandWorkspace
-          gateway={null}
           commandGateway={fixture.gateway}
           folderPicker={null}
         />
@@ -931,7 +944,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     });
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -961,7 +973,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     const fixture = createCommandGatewayFixture({ summaries, details });
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -1006,16 +1017,16 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
   });
 
-  it("通用桌面 Gateway 已连接但固定 Execution 未接线时只开放 Preview", async function showPendingRunWiring() {
+  it("通用桌面 Gateway 已连接时先开放 Preview 再开放一次性 Run", async function showPreviewThenRun() {
     renderConnectedWorkspace();
     await screen.findByRole("heading", { name: "PowerShell 参数回显", level: 1 });
 
     expect(screen.queryByText("需要桌面宿主")).toBeNull();
     expect(screen.queryByText(/纯浏览器环境/)).toBeNull();
-    expect(screen.getAllByText("Run 尚未接线").length).toBeGreaterThan(0);
     await waitFor(() => expect(screen.getByRole("button", { name: "生成 Preview" })).toHaveProperty("disabled", false));
-    expect(screen.queryByRole("button", { name: "运行尚未接线" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "运行验收任务" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "执行当前命令" })).toBeNull();
+    await clickAvailablePreview();
+    expect(await screen.findByRole("button", { name: "执行当前命令" })).toHaveProperty("disabled", false);
   });
 
   it("切换真实命令时按 id/revision/generation 重建表单且不继承同 key", async function resetFormOnCommandSwitch() {
@@ -1055,7 +1066,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
         : secondDetails.promise,
     );
     const rendered = render(
-      <CommandWorkspace gateway={null} commandGateway={fixture.gateway} folderPicker={null} />,
+      <CommandWorkspace commandGateway={fixture.gateway} folderPicker={null} />,
     );
     await waitFor(() => expect(screen.getByText("CMD 参数回显", { selector: ".command-row strong" })).toBeDefined());
     fireEvent.click(screen.getByRole("button", { name: /CMD 参数回显/ }));
@@ -1069,7 +1080,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     const unmountFixture = createCommandGatewayFixture();
     unmountFixture.gateway.listCommandBlocks = vi.fn(() => lateList.promise);
     rendered.unmount();
-    const lateRendered = render(<CommandWorkspace gateway={null} commandGateway={unmountFixture.gateway} folderPicker={null} />);
+    const lateRendered = render(<CommandWorkspace commandGateway={unmountFixture.gateway} folderPicker={null} />);
     lateRendered.unmount();
     await act(async () => lateList.resolve([...commandSummaries]));
     expect(unmountFixture.gateway.getCommandBlock).not.toHaveBeenCalled();
@@ -1090,7 +1101,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     });
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -1128,7 +1138,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     fixture.gateway.getCommandBlock = vi.fn(() => lateDetails.promise);
     const rendered = render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -1151,7 +1160,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     }));
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -1175,7 +1183,6 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     }));
     render(
       <CommandWorkspace
-        gateway={null}
         commandGateway={fixture.gateway}
         folderPicker={null}
       />,
@@ -1191,11 +1198,49 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     expect(screen.queryByText("正在读取当前 Definition…")).toBeNull();
   });
 
-  it("只按后端事件显示纯文本输出和自然终态", async function renderExecutionEvents() {
-    const fixture = createGatewayFixture();
-    const rendered = renderConnectedWorkspace(fixture.gateway);
+  it("同一提交双击只消费一次确认快照且 Run 响应不伪造 Started", async function consumePreviewOnce() {
+    const fixture = createCommandGatewayFixture({ deferRun: true });
+    renderConnectedWorkspace(fixture);
+    const runButton = await prepareConfirmedPreview();
+    /** Preview Gateway 收到的参数图用于验证 Run 再次隔离。 */
+    const previewRequest = vi.mocked(fixture.gateway.previewCommandBlock).mock
+      .calls[0]?.[0];
 
-    fireEvent.click(screen.getByRole("button", { name: "运行验收任务" }));
+    await act(async () => {
+      runButton.click();
+      runButton.click();
+    });
+
+    expect(fixture.gateway.runCommandBlock).toHaveBeenCalledOnce();
+    expect(fixture.eventHandlers).toHaveLength(1);
+    expect(fixture.runRequests).toEqual([
+      {
+        commandBlockId: commandSummaries[0].id,
+        expectedRevision: 1,
+        parameterValues: { text: "PowerShell 默认" },
+        executionSpecHash: "a".repeat(64),
+      },
+    ]);
+    expect(fixture.runRequests[0]?.parameterValues).not.toBe(
+      previewRequest?.parameterValues,
+    );
+    expect(Object.isFrozen(fixture.runRequests[0])).toBe(true);
+    expect(screen.queryByText("a".repeat(64))).toBeNull();
+    expect(screen.queryByRole("button", { name: "执行当前命令" })).toBeNull();
+    expect(screen.getAllByText("正在建立执行").length).toBeGreaterThan(0);
+
+    await act(async () => fixture.resolveRun());
+    await waitFor(() => expect(screen.getByText(fixture.executionId)).toBeDefined());
+    expect(screen.getAllByText("正在建立执行").length).toBeGreaterThan(0);
+    expect(screen.queryByText("运行中")).toBeNull();
+    expect(screen.getByRole("button", { name: "终止任务" })).toBeDefined();
+  });
+
+  it("只按后端事件显示纯文本输出和自然终态", async function renderExecutionEvents() {
+    const fixture = createCommandGatewayFixture();
+    const rendered = renderConnectedWorkspace(fixture);
+
+    await startConfirmedExecution();
     await waitFor(() => expect(screen.getByText(fixture.executionId)).toBeDefined());
     await act(async () => {
       fixture.emit({ event: "started", data: { executionId: fixture.executionId, sequence: 0 } });
@@ -1204,7 +1249,10 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
         data: {
           executionId: fixture.executionId,
           sequence: 1,
-          fragments: [{ fragmentSequence: 0, stream: "stdout", text: "<b>plain html</b> https://example.invalid \u001b[31mANSI" }],
+          fragments: [
+            { fragmentSequence: 0, stream: "stdout", text: "<b>plain html</b> https://example.invalid \u001b[31mANSI \u001b]8;;https://osc.invalid\u0007OSC\u001b]8;;\u0007" },
+            { fragmentSequence: 1, stream: "stderr", text: "" },
+          ],
           droppedBytesBefore: 0,
         },
       });
@@ -1219,7 +1267,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
       });
       fixture.emit({
         event: "finished",
-        data: { executionId: fixture.executionId, sequence: 2, exitCode: 0, durationMs: 8123, droppedOutputBytes: 0 },
+        data: { executionId: fixture.executionId, sequence: 2, exitCode: 7, durationMs: 8123, droppedOutputBytes: 0 },
       });
       fixture.emit({
         event: "output",
@@ -1239,19 +1287,24 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     expect(screen.getByText(/<b>plain html<\/b>/)).toBeDefined();
     expect(rendered.container.querySelector(".execution-output b")).toBeNull();
     expect(screen.queryByRole("link", { name: /example\.invalid/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /osc\.invalid/ })).toBeNull();
+    expect(rendered.container.querySelectorAll(".execution-output .output-line")).toHaveLength(1);
     expect(screen.queryByText("重复事件不得显示")).toBeNull();
     expect(screen.getByText("任务自然结束")).toBeDefined();
     expect(screen.getByText("8123 ms")).toBeDefined();
-    expect(screen.getByText("0", { selector: "dd" })).toBeDefined();
+    expect(screen.getByText("7", { selector: "dd" })).toBeDefined();
     expect(screen.queryByText("终态后输出不得显示")).toBeNull();
-    expect(screen.queryByText("任务失败")).toBeNull();
+    expect(screen.queryByText("任务内部失败")).toBeNull();
+    expect(screen.queryByText(/Outcome/)).toBeNull();
+    expect(screen.getByRole("button", { name: "重新生成 Preview" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "执行当前命令" })).toBeNull();
   });
 
   it("只在启动响应锁定 Execution ID 后重放匹配事件", async function lockResponseExecutionId() {
-    const fixture = createGatewayFixture({ deferStart: true });
-    renderConnectedWorkspace(fixture.gateway);
+    const fixture = createCommandGatewayFixture({ deferRun: true });
+    renderConnectedWorkspace(fixture);
 
-    fireEvent.click(screen.getByRole("button", { name: "运行验收任务" }));
+    await startConfirmedExecution();
     await act(async () => {
       fixture.emit({ event: "started", data: { executionId: "11111111-1111-4111-8111-111111111111", sequence: 0 } });
       fixture.emit({ event: "finished", data: { executionId: "11111111-1111-4111-8111-111111111111", sequence: 1, exitCode: 0, durationMs: 1, droppedOutputBytes: 0 } });
@@ -1259,21 +1312,21 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     expect(screen.queryByText("11111111-1111-4111-8111-111111111111")).toBeNull();
     expect(screen.queryByText("任务自然结束")).toBeNull();
 
-    await act(async () => fixture.resolveStart());
+    await act(async () => fixture.resolveRun());
     await waitFor(() => expect(screen.getByText(fixture.executionId)).toBeDefined());
     expect(screen.queryByText("任务自然结束")).toBeNull();
   });
 
   it("把启动响应前的可信与错误 ID 输出共同限制在 512 KiB 内", async function boundPreResponseEvents() {
-    const fixture = createGatewayFixture({ deferStart: true });
-    const rendered = renderConnectedWorkspace(fixture.gateway);
+    const fixture = createCommandGatewayFixture({ deferRun: true });
+    const rendered = renderConnectedWorkspace(fixture);
     const chunk = "x".repeat(64 * 1024);
     const wrongExecutionId = "22222222-2222-4222-8222-222222222222";
 
-    fireEvent.click(screen.getByRole("button", { name: "运行验收任务" }));
+    await startConfirmedExecution();
     await act(async () => {
       fixture.emit({ event: "started", data: { executionId: fixture.executionId, sequence: 0 } });
-      for (let sequence = 1; sequence <= 12; sequence += 1) {
+      for (let sequence = 1; sequence <= 13; sequence += 1) {
         fixture.emit({
           event: "output",
           data: {
@@ -1284,7 +1337,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
           },
         });
       }
-      fixture.resolveStart();
+      fixture.resolveRun();
     });
 
     await waitFor(() => expect(screen.getAllByText("运行中").length).toBeGreaterThan(0));
@@ -1296,10 +1349,10 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
   });
 
   it("不把错误 Execution ID 的预响应淘汰计入当前任务", async function ignoreWrongIdDrops() {
-    const fixture = createGatewayFixture({ deferStart: true });
-    renderConnectedWorkspace(fixture.gateway);
+    const fixture = createCommandGatewayFixture({ deferRun: true });
+    renderConnectedWorkspace(fixture);
 
-    fireEvent.click(screen.getByRole("button", { name: "运行验收任务" }));
+    await startConfirmedExecution();
     await act(async () => {
       fixture.emit({
         event: "output",
@@ -1310,7 +1363,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
           droppedBytesBefore: 700,
         },
       });
-      fixture.resolveStart();
+      fixture.resolveRun();
     });
 
     await waitFor(() => expect(screen.getByText(fixture.executionId)).toBeDefined());
@@ -1318,10 +1371,10 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
   });
 
   it("完整记录匹配 Execution 被淘汰事件的文本与 Rust 丢弃字节", async function preserveAuthenticatedDrops() {
-    const fixture = createGatewayFixture({ deferStart: true });
-    renderConnectedWorkspace(fixture.gateway);
+    const fixture = createCommandGatewayFixture({ deferRun: true });
+    renderConnectedWorkspace(fixture);
 
-    fireEvent.click(screen.getByRole("button", { name: "运行验收任务" }));
+    await startConfirmedExecution();
     await act(async () => {
       fixture.emit({
         event: "output",
@@ -1332,7 +1385,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
           droppedBytesBefore: 1000,
         },
       });
-      fixture.resolveStart();
+      fixture.resolveRun();
     });
 
     await waitFor(() => {
@@ -1341,8 +1394,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
   });
 
   it("Execution 活跃时锁定切换、输入、Picker 和移除，并在终态后恢复", async function lockConfigurationDuringExecution() {
-    const executionFixture = createGatewayFixture({ deferStart: true });
-    const commandFixture = createCommandGatewayFixture();
+    const commandFixture = createCommandGatewayFixture({ deferRun: true });
     const firstDefinition = commandFixture.details.get(commandSummaries[0].id);
     if (!firstDefinition) throw new Error("测试必须存在第一条 Definition");
     firstDefinition.parameters.push({
@@ -1365,42 +1417,41 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     };
     render(
       <CommandWorkspace
-        gateway={executionFixture.gateway}
         commandGateway={commandFixture.gateway}
         folderPicker={picker}
       />,
     );
-    await screen.findByRole("textbox", { name: /文本/ });
-
-    fireEvent.click(screen.getByRole("button", { name: "运行验收任务" }));
+    await startConfirmedExecution();
     await waitFor(() => {
       expect((screen.getByRole("textbox", { name: /文本/ }) as HTMLInputElement).disabled).toBe(true);
       expect((screen.getByRole("button", { name: "添加多个目录" }) as HTMLButtonElement).disabled).toBe(true);
       expect((screen.getByRole("button", { name: "移除多个目录第 1 项" }) as HTMLButtonElement).disabled).toBe(true);
       expect((screen.getByRole("button", { name: /CMD 参数回显/ }) as HTMLButtonElement).disabled).toBe(true);
       expect((screen.getByRole("searchbox", { name: "搜索命令块" }) as HTMLInputElement).disabled).toBe(true);
+      expect((screen.getByRole("button", { name: "生成 Preview" }) as HTMLButtonElement).disabled).toBe(true);
     });
     fireEvent.click(screen.getByRole("button", { name: /CMD 参数回显/ }));
     expect(commandFixture.gateway.getCommandBlock).toHaveBeenCalledTimes(1);
 
-    await act(async () => executionFixture.resolveStart());
-    await act(async () => executionFixture.emit({ event: "started", data: { executionId: executionFixture.executionId, sequence: 0 } }));
-    await act(async () => executionFixture.emit({ event: "finished", data: { executionId: executionFixture.executionId, sequence: 1, exitCode: 0, durationMs: 10, droppedOutputBytes: 0 } }));
+    await act(async () => commandFixture.resolveRun());
+    await act(async () => commandFixture.emit({ event: "started", data: { executionId: commandFixture.executionId, sequence: 0 } }));
+    await act(async () => commandFixture.emit({ event: "finished", data: { executionId: commandFixture.executionId, sequence: 1, exitCode: 0, durationMs: 10, droppedOutputBytes: 0 } }));
     await waitFor(() => {
       expect((screen.getByRole("textbox", { name: /文本/ }) as HTMLInputElement).disabled).toBe(false);
       expect((screen.getByRole("button", { name: "添加多个目录" }) as HTMLButtonElement).disabled).toBe(false);
       expect((screen.getByRole("button", { name: "移除多个目录第 1 项" }) as HTMLButtonElement).disabled).toBe(false);
       expect((screen.getByRole("button", { name: /CMD 参数回显/ }) as HTMLButtonElement).disabled).toBe(false);
       expect((screen.getByRole("searchbox", { name: "搜索命令块" }) as HTMLInputElement).disabled).toBe(false);
+      expect((screen.getByRole("button", { name: "重新生成 Preview" }) as HTMLButtonElement).disabled).toBe(false);
     });
     expect(picker.pickFolders).not.toHaveBeenCalled();
   });
 
   it("取消响应和后端终态分别推进 Cancelling 与 Cancelled", async function cancelExecution() {
-    const fixture = createGatewayFixture();
-    renderConnectedWorkspace(fixture.gateway);
+    const fixture = createCommandGatewayFixture();
+    renderConnectedWorkspace(fixture);
 
-    fireEvent.click(screen.getByRole("button", { name: "运行验收任务" }));
+    await startConfirmedExecution();
     await waitFor(() => expect(screen.getByText(fixture.executionId)).toBeDefined());
     await act(async () => {
       fixture.emit({ event: "started", data: { executionId: fixture.executionId, sequence: 0 } });
@@ -1416,14 +1467,197 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
       });
     });
     expect(screen.getByText("任务已取消")).toBeDefined();
-    expect(screen.getByRole("button", { name: "再次运行" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "重新生成 Preview" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "执行当前命令" })).toBeNull();
+  });
+
+  it("Starting 获得响应 ID 后双击只取消一次且 Started 不倒退 Cancelling", async function cancelDuringStarting() {
+    const fixture = createCommandGatewayFixture({
+      deferCancel: true,
+      cancelResponse: { accepted: false, state: "cancelling" },
+    });
+    renderConnectedWorkspace(fixture);
+    await startConfirmedExecution();
+    const cancelButton = await screen.findByRole("button", {
+      name: "终止任务",
+    });
+
+    await act(async () => {
+      cancelButton.click();
+      cancelButton.click();
+    });
+    expect(fixture.gateway.cancelExecution).toHaveBeenCalledOnce();
+    expect(fixture.cancelledExecutionIds).toEqual([fixture.executionId]);
+
+    await act(async () => fixture.resolveCancel());
+    expect(screen.getAllByText("正在终止进程树").length).toBeGreaterThan(0);
+    await act(async () => {
+      fixture.emit({
+        event: "started",
+        data: { executionId: fixture.executionId, sequence: 0 },
+      });
+    });
+    expect(screen.getAllByText("正在终止进程树").length).toBeGreaterThan(0);
+    expect(screen.queryByText("运行中")).toBeNull();
+  });
+
+  it("Cancel null 保持生命周期并释放同步 token 允许重试", async function retryNullCancel() {
+    const fixture = createCommandGatewayFixture({
+      cancelResponse: { accepted: false, state: null },
+    });
+    renderConnectedWorkspace(fixture);
+    await startConfirmedExecution();
+    const firstCancelButton = await screen.findByRole("button", {
+      name: "终止任务",
+    });
+    fireEvent.click(firstCancelButton);
+    await waitFor(() =>
+      expect(fixture.gateway.cancelExecution).toHaveBeenCalledTimes(1),
+    );
+    const retryButton = await screen.findByRole("button", {
+      name: "终止任务",
+    });
+    await waitFor(() => expect(retryButton).toHaveProperty("disabled", false));
+    fireEvent.click(retryButton);
+    await waitFor(() =>
+      expect(fixture.gateway.cancelExecution).toHaveBeenCalledTimes(2),
+    );
+
+    expect(screen.getAllByText("正在建立执行").length).toBeGreaterThan(0);
+    expect(screen.queryByText("正在终止进程树")).toBeNull();
+  });
+
+  it("Cancel 失败只显示固定公开说明并保持 Running 可重试", async function retryFailedCancel() {
+    const fixture = createCommandGatewayFixture({
+      cancelFailure: {
+        code: "CANCEL_FAILED",
+        message: String.raw`C:\private\cancel-secret`,
+      },
+    });
+    renderConnectedWorkspace(fixture);
+    await startConfirmedExecution();
+    await waitFor(() => expect(screen.getByText(fixture.executionId)).toBeDefined());
+    await act(async () => {
+      fixture.emit({
+        event: "started",
+        data: { executionId: fixture.executionId, sequence: 0 },
+      });
+    });
+    fireEvent.click(screen.getByRole("button", { name: "终止任务" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveProperty(
+        "textContent",
+        "CANCEL_FAILED无法终止当前 Execution",
+      ),
+    );
+    expect(screen.queryByText(/cancel-secret/)).toBeNull();
+    expect(screen.getAllByText("运行中").length).toBeGreaterThan(0);
+    const retryButton = screen.getByRole("button", { name: "终止任务" });
+    await waitFor(() => expect(retryButton).toHaveProperty("disabled", false));
+    fireEvent.click(retryButton);
+    await waitFor(() =>
+      expect(fixture.gateway.cancelExecution).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("新 Run generation 拒绝旧 Channel 即使复用同一 Execution ID", async function isolateRunGenerations() {
+    const fixture = createCommandGatewayFixture();
+    renderConnectedWorkspace(fixture);
+    await startConfirmedExecution();
+    await waitFor(() => expect(fixture.eventHandlers).toHaveLength(1));
+    await act(async () => {
+      fixture.emit({
+        event: "started",
+        data: { executionId: fixture.executionId, sequence: 0 },
+      });
+      fixture.emit({
+        event: "finished",
+        data: {
+          executionId: fixture.executionId,
+          sequence: 1,
+          exitCode: 0,
+          durationMs: 5,
+          droppedOutputBytes: 0,
+        },
+      });
+    });
+    await clickAvailablePreview("重新生成 Preview");
+    const secondRunButton = await screen.findByRole("button", {
+      name: "执行当前命令",
+    });
+    fireEvent.click(secondRunButton);
+    await waitFor(() => expect(fixture.eventHandlers).toHaveLength(2));
+
+    await act(async () => {
+      fixture.emit(
+        {
+          event: "output",
+          data: {
+            executionId: fixture.executionId,
+            sequence: 100,
+            fragments: [
+              {
+                fragmentSequence: 100,
+                stream: "stderr",
+                text: "旧 generation 输出",
+              },
+            ],
+            droppedBytesBefore: 0,
+          },
+        },
+        0,
+      );
+      fixture.emit(
+        {
+          event: "failed",
+          data: {
+            executionId: fixture.executionId,
+            sequence: 101,
+            message: "旧 generation 终态",
+            durationMs: 99,
+            droppedOutputBytes: 0,
+          },
+        },
+        0,
+      );
+      fixture.emit(
+        {
+          event: "started",
+          data: { executionId: fixture.executionId, sequence: 0 },
+        },
+        1,
+      );
+      fixture.emit(
+        {
+          event: "output",
+          data: {
+            executionId: fixture.executionId,
+            sequence: 1,
+            fragments: [
+              {
+                fragmentSequence: 1,
+                stream: "stdout",
+                text: "当前 generation 输出",
+              },
+            ],
+            droppedBytesBefore: 0,
+          },
+        },
+        1,
+      );
+    });
+
+    expect(screen.queryByText("旧 generation 输出")).toBeNull();
+    expect(screen.queryByText("旧 generation 终态")).toBeNull();
+    expect(screen.getByText("当前 generation 输出")).toBeDefined();
+    expect(screen.queryByText("任务内部失败")).toBeNull();
   });
 
   it("终态不被较晚的取消响应倒退", async function isolateLateCancelResponse() {
-    const fixture = createGatewayFixture({ deferCancel: true });
-    renderConnectedWorkspace(fixture.gateway);
+    const fixture = createCommandGatewayFixture({ deferCancel: true });
+    renderConnectedWorkspace(fixture);
 
-    fireEvent.click(screen.getByRole("button", { name: "运行验收任务" }));
+    await startConfirmedExecution();
     await waitFor(() => expect(screen.getByText(fixture.executionId)).toBeDefined());
     await act(async () => fixture.emit({ event: "started", data: { executionId: fixture.executionId, sequence: 0 } }));
     fireEvent.click(screen.getByRole("button", { name: "终止任务" }));
@@ -1436,29 +1670,349 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
   });
 
   it("下一次运行不受旧取消错误污染", async function isolateLateCancelError() {
-    const fixture = createGatewayFixture({ deferCancel: true, cancelFailure: true });
-    renderConnectedWorkspace(fixture.gateway);
+    const fixture = createCommandGatewayFixture({
+      deferCancel: true,
+      cancelFailure: { code: "CANCEL_FAILED", message: "private" },
+    });
+    renderConnectedWorkspace(fixture);
 
-    fireEvent.click(screen.getByRole("button", { name: "运行验收任务" }));
+    await startConfirmedExecution();
     await waitFor(() => expect(screen.getByText(fixture.executionId)).toBeDefined());
     await act(async () => fixture.emit({ event: "started", data: { executionId: fixture.executionId, sequence: 0 } }));
     fireEvent.click(screen.getByRole("button", { name: "终止任务" }));
     await act(async () => fixture.emit({ event: "cancelled", data: { executionId: fixture.executionId, sequence: 1, durationMs: 50, droppedOutputBytes: 0 } }));
-    fireEvent.click(screen.getByRole("button", { name: "再次运行" }));
+    await clickAvailablePreview("重新生成 Preview");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "执行当前命令" }),
+    );
+    await waitFor(() => expect(fixture.eventHandlers).toHaveLength(2));
     await act(async () => fixture.resolveCancel());
 
     expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText("任务已取消")).toBeNull();
     expect(screen.getAllByText("正在建立执行").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "终止任务" })).toBeDefined();
+  });
+
+  it("表驱动收敛全部 Run 公开拒绝与未知值并闭合迟到 Channel", async function normalizeRunRejections() {
+    /** Run 当前公开的 11 个拒绝码及其固定前端说明。 */
+    const publishedRunErrors = [
+      ["COMMAND_BLOCK_NOT_FOUND", "未找到指定的 Command Block"],
+      ["REVISION_CONFLICT", "Command Block 已更新，请重新载入"],
+      ["VALIDATION_FAILED", "请求参数未通过校验"],
+      ["INVALID_TEMPLATE", "Command Block 模板无效"],
+      ["UNSUPPORTED_RUNNER", "当前 Runner 尚不支持"],
+      ["RUNNER_UNAVAILABLE", "系统 Runner 不可用"],
+      ["INTERNAL_CONTRACT", "Command Block 内部契约无效"],
+      ["STALE_PREVIEW", "Preview 已失效，请重新生成"],
+      ["ARTIFACT_PREPARATION_FAILED", "无法准备 Execution 临时脚本"],
+      ["PROCESS_START_FAILED", "无法启动 Execution 进程"],
+      ["EXECUTION_START_FAILED", "无法建立 Execution 后台任务"],
+    ] as const;
+    /** 未发布拒绝必须统一收敛到本地 IPC 失败。 */
+    const cases: ReadonlyArray<{
+      /** Gateway 实际拒绝值。 */
+      readonly rejection: unknown;
+      /** UI 允许显示的固定错误码。 */
+      readonly expectedCode: string;
+      /** UI 允许显示的固定说明。 */
+      readonly expectedMessage: string;
+      /** 是否必须重新读取 Summary 与 Details 身份。 */
+      readonly reloadIdentity: boolean;
+    }> = [
+      ...publishedRunErrors.map(([code, expectedMessage]) => ({
+        rejection: {
+          code,
+          message: String.raw`C:\private\run-secret`,
+        },
+        expectedCode: code,
+        expectedMessage,
+        reloadIdentity:
+          code === "COMMAND_BLOCK_NOT_FOUND" || code === "REVISION_CONFLICT",
+      })),
+      {
+        rejection: { code: "UNKNOWN_RUN", message: "private unknown" },
+        expectedCode: "IPC_FAILED",
+        expectedMessage: "CmdBox 无法完成桌面宿主调用",
+        reloadIdentity: false,
+      },
+    ];
+
+    for (const testCase of cases) {
+      cleanup();
+      const fixture = createCommandGatewayFixture({
+        deferRun: true,
+        runFailure: testCase.rejection,
+      });
+      renderConnectedWorkspace(fixture);
+      await startConfirmedExecution();
+      await act(async () => {
+        fixture.emit({
+          event: "started",
+          data: { executionId: fixture.executionId, sequence: 0 },
+        });
+        fixture.emit({
+          event: "output",
+          data: {
+            executionId: fixture.executionId,
+            sequence: 1,
+            fragments: [
+              {
+                fragmentSequence: 1,
+                stream: "stdout",
+                text: `拒绝前缓存-${testCase.expectedCode}`,
+              },
+            ],
+            droppedBytesBefore: 0,
+          },
+        });
+        fixture.resolveRun();
+      });
+      await waitFor(() =>
+        expect(screen.getByRole("alert")).toHaveProperty(
+          "textContent",
+          `${testCase.expectedCode}${testCase.expectedMessage}`,
+        ),
+      );
+      await act(async () => {
+        fixture.emit({
+          event: "output",
+          data: {
+            executionId: fixture.executionId,
+            sequence: 2,
+            fragments: [
+              {
+                fragmentSequence: 2,
+                stream: "stderr",
+                text: `拒绝后迟到-${testCase.expectedCode}`,
+              },
+            ],
+            droppedBytesBefore: 0,
+          },
+        });
+        fixture.emit({
+          event: "finished",
+          data: {
+            executionId: fixture.executionId,
+            sequence: 3,
+            exitCode: 0,
+            durationMs: 3,
+            droppedOutputBytes: 0,
+          },
+        });
+      });
+
+      expect(screen.queryByText(/拒绝前缓存-/)).toBeNull();
+      expect(screen.queryByText(/拒绝后迟到-/)).toBeNull();
+      expect(screen.queryByText("任务自然结束")).toBeNull();
+      expect(screen.queryByText("a".repeat(64))).toBeNull();
+      expect(screen.queryByRole("button", { name: "执行当前命令" })).toBeNull();
+      expect(screen.queryByText(/run-secret|private unknown/)).toBeNull();
+      expect(screen.getByText("尚未创建")).toBeDefined();
+      expect(
+        (screen.getByRole("searchbox", {
+          name: "搜索命令块",
+        }) as HTMLInputElement).disabled,
+      ).toBe(false);
+      await waitFor(() =>
+        expect(fixture.gateway.listCommandBlocks).toHaveBeenCalledTimes(
+          testCase.reloadIdentity ? 2 : 1,
+        ),
+      );
+      await waitFor(() =>
+        expect(fixture.gateway.getCommandBlock).toHaveBeenCalledTimes(
+          testCase.reloadIdentity ? 2 : 1,
+        ),
+      );
+      const previewButton = await screen.findByRole("button", {
+        name: "生成 Preview",
+      });
+      await waitFor(() =>
+        expect(previewButton).toHaveProperty("disabled", false),
+      );
+    }
+  }, 15_000);
+
+  it("身份拒绝 reload 无参数 Definition 后仍要求用户手动重新 Preview", async function suppressReloadAutoPreview() {
+    /** 当前测试唯一的无参数 Command Block 摘要。 */
+    const summary: CommandBlockSummary = {
+      ...commandSummaries[0],
+      id: "builtin.parameterless-reload",
+      name: "无参数身份恢复",
+    };
+    /** 与摘要身份完全一致的无参数详情。 */
+    const details: CommandBlockDetails = { ...summary, parameters: [] };
+    const fixture = createCommandGatewayFixture({
+      summaries: [summary],
+      details: new Map([[summary.id, details]]),
+      runFailure: { code: "REVISION_CONFLICT", message: "private" },
+    });
+    renderConnectedWorkspace(fixture);
+    const firstRunButton = await screen.findByRole("button", {
+      name: "执行当前命令",
+    });
+    expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledOnce();
+    fireEvent.click(firstRunButton);
+
+    await waitFor(() =>
+      expect(fixture.gateway.getCommandBlock).toHaveBeenCalledTimes(2),
+    );
+    expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledOnce();
+    const manualPreviewButton = await screen.findByRole("button", {
+      name: "生成 Preview",
+    });
+    await waitFor(() =>
+      expect(manualPreviewButton).toHaveProperty("disabled", false),
+    );
+    fireEvent.click(manualPreviewButton);
+    await waitFor(() =>
+      expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledTimes(2),
+    );
+    expect(
+      await screen.findByRole("button", { name: "执行当前命令" }),
+    ).toBeDefined();
+  });
+
+  it("身份恢复 List 迟到时不覆盖用户期间手动选择的新命令", async function preserveManualSelectionDuringIdentityReload() {
+    /** 让 Run 身份拒绝触发的第二次 List 保持挂起，精确复现恢复与手动选择竞态。 */
+    const recoveryList = createDeferred<CommandBlockSummary[]>();
+    let listRequestIndex = 0;
+    const fixture = createCommandGatewayFixture({
+      runFailure: { code: "REVISION_CONFLICT", message: "private" },
+    });
+    fixture.gateway.listCommandBlocks = vi.fn(() => {
+      listRequestIndex += 1;
+      return listRequestIndex === 1
+        ? Promise.resolve([...commandSummaries])
+        : recoveryList.promise;
+    });
+    renderConnectedWorkspace(fixture);
+    await startConfirmedExecution();
+    await waitFor(() =>
+      expect(fixture.gateway.listCommandBlocks).toHaveBeenCalledTimes(2),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /CMD 参数回显/ }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "CMD 参数回显", level: 1 }),
+      ).toBeDefined(),
+    );
+    expect(screen.getByRole("textbox", { name: /文本/ })).toHaveProperty(
+      "value",
+      "CMD 默认",
+    );
+
+    await act(async () => recoveryList.resolve([...commandSummaries]));
+
+    expect(
+      screen.getByRole("heading", { name: "CMD 参数回显", level: 1 }),
+    ).toBeDefined();
+    expect(screen.getByRole("textbox", { name: /文本/ })).toHaveProperty(
+      "value",
+      "CMD 默认",
+    );
+    expect(fixture.gateway.getCommandBlock).toHaveBeenCalledTimes(2);
+  });
+
+  it("身份恢复 List 迟到拒绝时不污染用户期间加载的新命令", async function discardIdentityReloadErrorAfterManualSelection() {
+    /** 第二次 List 由测试延迟拒绝，用于验证旧恢复 catch 同样受身份所有权门禁。 */
+    const recoveryList = createDeferred<CommandBlockSummary[]>();
+    let listRequestIndex = 0;
+    const fixture = createCommandGatewayFixture({
+      runFailure: { code: "REVISION_CONFLICT", message: "private" },
+    });
+    fixture.gateway.listCommandBlocks = vi.fn(() => {
+      listRequestIndex += 1;
+      return listRequestIndex === 1
+        ? Promise.resolve([...commandSummaries])
+        : recoveryList.promise;
+    });
+    renderConnectedWorkspace(fixture);
+    await startConfirmedExecution();
+    await waitFor(() =>
+      expect(fixture.gateway.listCommandBlocks).toHaveBeenCalledTimes(2),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /CMD 参数回显/ }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "CMD 参数回显", level: 1 }),
+      ).toBeDefined(),
+    );
+    expect(screen.getByRole("textbox", { name: /文本/ })).toHaveProperty(
+      "value",
+      "CMD 默认",
+    );
+
+    await act(async () =>
+      recoveryList.reject({
+        code: "RUNNER_UNAVAILABLE",
+        message: "private old recovery",
+      }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "CMD 参数回显", level: 1 }),
+    ).toBeDefined();
+    expect(screen.getByRole("textbox", { name: /文本/ })).toHaveProperty(
+      "value",
+      "CMD 默认",
+    );
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getByRole("alert")).toHaveProperty(
+      "textContent",
+      "REVISION_CONFLICTCommand Block 已更新，请重新载入",
+    );
+    expect(screen.queryByText("RUNNER_UNAVAILABLE")).toBeNull();
+    expect(fixture.gateway.getCommandBlock).toHaveBeenCalledTimes(2);
+  });
+
+  it("组件卸载后失效 Run 响应与专属 Channel 的全部迟到事实", async function discardRunAfterUnmount() {
+    const fixture = createCommandGatewayFixture({ deferRun: true });
+    const rendered = renderConnectedWorkspace(fixture);
+    await startConfirmedExecution();
+    expect(fixture.eventHandlers).toHaveLength(1);
+    rendered.unmount();
+
+    await act(async () => {
+      fixture.emit({
+        event: "started",
+        data: { executionId: fixture.executionId, sequence: 0 },
+      });
+      fixture.emit({
+        event: "output",
+        data: {
+          executionId: fixture.executionId,
+          sequence: 1,
+          fragments: [
+            {
+              fragmentSequence: 1,
+              stream: "stdout",
+              text: "卸载后迟到输出",
+            },
+          ],
+          droppedBytesBefore: 0,
+        },
+      });
+      fixture.resolveRun();
+    });
+
+    expect(rendered.container).toHaveProperty("textContent", "");
+    expect(fixture.gateway.cancelExecution).not.toHaveBeenCalled();
   });
 
   it("启动失败显示公开错误并恢复可运行状态", async function showStartFailure() {
-    const fixture = createGatewayFixture({ startFailure: true });
-    renderConnectedWorkspace(fixture.gateway);
+    const fixture = createCommandGatewayFixture({
+      runFailure: { code: "PROCESS_START_FAILED", message: "private" },
+    });
+    renderConnectedWorkspace(fixture);
 
-    fireEvent.click(screen.getByRole("button", { name: "运行验收任务" }));
+    await startConfirmedExecution();
     await waitFor(() => {
       expect(screen.getByRole("alert")).toHaveProperty("textContent", expect.stringContaining("PROCESS_START_FAILED"));
     });
-    expect(screen.getByRole("button", { name: "运行验收任务" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "生成 Preview" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "执行当前命令" })).toBeNull();
   });
 });

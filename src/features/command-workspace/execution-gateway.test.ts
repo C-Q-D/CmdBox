@@ -1,7 +1,4 @@
 /** Command Block Execution Gateway 的窄命令、Channel 与错误契约测试。 */
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type {
   ExecutionStreamEvent,
@@ -10,7 +7,6 @@ import type {
 } from "../../generated/contracts";
 import {
   createCommandExecutionGateway,
-  createFixedExecutionGateway,
   normalizeApiError,
   PUBLISHED_API_ERROR_CODES,
   type ExecutionTransport,
@@ -231,38 +227,4 @@ describe("Command Block Execution Gateway", function describeGateway() {
     }
   });
 
-  it("旧 Factory 无参数固定返回 null 且生产前端不存在已删除命令", function removedLegacyCommand() {
-    const fixture = createTransport();
-
-    expect(createFixedExecutionGateway()).toBeNull();
-    expect(createFixedExecutionGateway.length).toBe(0);
-    expect(fixture.calls).toHaveLength(0);
-    expect(readProductionFrontendSource()).not.toContain(
-      ["start", "fixed", "execution"].join("_"),
-    );
-  });
 });
-
-/** 读取 `src/` 下除测试以外的前端生产 TypeScript 源码。 */
-function readProductionFrontendSource(): string {
-  const currentDirectory = dirname(fileURLToPath(import.meta.url));
-  const sourceRoot = resolve(currentDirectory, "../..");
-  return readProductionDirectory(sourceRoot).join("\n");
-}
-
-/** 递归读取生产 `.ts`/`.tsx` 文件，排除测试文件。 */
-function readProductionDirectory(directory: string): string[] {
-  const contents: string[] = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      contents.push(...readProductionDirectory(path));
-    } else if (
-      /\.tsx?$/.test(entry.name) &&
-      !/\.test\.tsx?$/.test(entry.name)
-    ) {
-      contents.push(readFileSync(path, "utf8"));
-    }
-  }
-  return contents;
-}

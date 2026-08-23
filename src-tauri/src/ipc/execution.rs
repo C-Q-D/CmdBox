@@ -1,6 +1,6 @@
 //! Command Block 读取、Preview、Run、事件与取消的窄 Tauri IPC 适配层。
 //!
-//! React 只能提交业务 ID、revision、结构化参数、Preview Hash 和专属 Channel。Planner 在
+//! React 只能提交业务 ID、revision、结构化参数、`executionSpecHash` 和专属 Channel。Planner 在
 //! 一切启动副作用之前复验完整 Execution Spec；本层不接受脚本、可执行文件、PID 或参数旁路。
 
 use std::sync::mpsc::RecvTimeoutError;
@@ -680,7 +680,7 @@ mod tests {
         assert_eq!(dropped_bytes_before, 128);
     }
 
-    /// 验证公开 DTO 精确白名单且 Run Request 只含业务身份、值和 Preview Hash。
+    /// 验证公开 DTO 精确白名单且 Run Request 只含业务身份、值和 `executionSpecHash`。
     #[test]
     fn exposes_only_command_block_ipc_field_whitelists() {
         let planner = ExecutionPlanner::new();

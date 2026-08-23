@@ -2,9 +2,8 @@
  * 真实 Command Block Definition 驱动的统一 Command Workspace。
  *
  * 组件继承用户确认的 editorial-field-notes 视觉语法，读取真实 Summary/Details 并渲染
- * 统一 Parameter Form 与 Rust Preview，同时完整保留已经验证的 CMD-01 Execution
- * 生命周期与 Output 内核。Preview 只消费 Rust 事实，本模块不渲染 Shell、不计算 Hash，
- * 也不会在 UI-RUN 原子前调用通用 Run 或创建 Execution Channel。
+ * 统一 Parameter Form、Rust Preview 与通用 Execution 生命周期。Preview 和 Run 都只消费
+ * Rust 事实，本模块不渲染 Shell、不计算 Hash，也不从 Exit Code 推导业务 Outcome。
  */
 import { ArrowBendRightDownIcon } from "@phosphor-icons/react/dist/csr/ArrowBendRightDown";
 import { CalendarBlankIcon } from "@phosphor-icons/react/dist/csr/CalendarBlank";
@@ -26,20 +25,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import cmdboxIcon from "../../../src-tauri/icons/icon.png";
 import {
   createCommandExecutionGateway,
-  createFixedExecutionGateway,
   normalizeApiError,
   type ApiError,
   type CommandBlockDetails,
   type CommandBlockSummary,
   type CommandExecutionGateway,
   type ExecutionStreamEvent,
-  type FixedExecutionGateway,
   type PreviewCommandResponse,
 } from "./execution-gateway";
 import {
   appendExecutionOutput,
+  createPendingExecutionEventBuffer,
   createExecutionOutputBuffer,
-  EXECUTION_OUTPUT_LIMIT_BYTES,
+  drainPendingExecutionEventBuffer,
+  queuePendingExecutionEvent,
+  resetPendingExecutionEventBuffer,
 } from "./execution-output-buffer";
 import {
   createDesktopWindowControls,
@@ -54,13 +54,11 @@ import {
 import {
   acceptPreviewResponse,
   createPreviewAttempt,
+  createVerifyRunRequest,
   type ConfirmedPreview,
   type DeepReadonly,
   type PreviewAttempt,
 } from "./preview-state";
-
-/** 旧固定任务 Gateway 已停止生产装配，仅保留测试注入 seam。 */
-const defaultGateway = createFixedExecutionGateway();
 
 /** 浏览器加载时解析一次通用 Command Block Gateway；非 Tauri 环境保持 `null`。 */
 const defaultCommandGateway = createCommandExecutionGateway();
@@ -71,40 +69,9 @@ const defaultFolderPicker = createFolderPicker();
 /** 浏览器加载时解析一次当前窗口控制；非 Tauri 环境保持 `null`。 */
 const defaultWindowControls = createDesktopWindowControls();
 
-/** 启动响应前最多缓存的事件数，限制无文本元数据事件的内存占用。 */
-const PENDING_EVENT_LIMIT = 2048;
-
-/** 预响应淘汰账本最多跟踪的不同 Execution ID 数量。 */
-const PENDING_DROPPED_EXECUTION_LIMIT = 64;
-
-/** 估算一个待认证事件占用的 UTF-8 负载字节数，并给元数据预留固定预算。 */
-function pendingEventBytes(event: ExecutionStreamEvent): number {
-  const metadataBudget = 128;
-  if (event.event !== "output") {
-    return metadataBudget;
-  }
-  return metadataBudget + event.data.fragments.reduce(
-    (total, fragment) => total + new TextEncoder().encode(fragment.text).byteLength,
-    0,
-  );
-}
-
-/** 计算淘汰一个预响应 Output 事件时未保留的文本字节数。 */
-function pendingOutputBytes(event: ExecutionStreamEvent): number {
-  if (event.event !== "output") {
-    return 0;
-  }
-  return event.data.fragments.reduce(
-    (total, fragment) => total + new TextEncoder().encode(fragment.text).byteLength,
-    0,
-  );
-}
-
 /** Workspace 可由测试注入无副作用 Gateway。 */
 export interface CommandWorkspaceProps {
-  /** 仅供既有 Execution 回归测试注入的固定任务 IPC；生产默认不再装配。 */
-  gateway?: FixedExecutionGateway | null;
-  /** Summary/Details/Preview/Run 的窄业务 Gateway；本原子只使用前两项。 */
+  /** Summary、Details、Preview、Run 与 Cancel 的唯一窄业务 Gateway。 */
   commandGateway?: CommandExecutionGateway | null;
   /** Parameter Form 使用的原生目录 Picker；浏览器环境为 `null`。 */
   folderPicker?: FolderPicker | null;
@@ -142,6 +109,12 @@ interface LoadedDefinition {
   generation: number;
 }
 
+/** 选择 Definition 时用于恢复身份而不越过用户 Preview 动作的选项。 */
+interface SelectCommandOptions {
+  /** 禁止无参数 Definition 在本 generation 自动 Preview。 */
+  readonly suppressParameterlessAutoPreview?: boolean;
+}
+
 /** Preview 与 Execution 正交的前端界面阶段。 */
 type PreviewPhase = "configuring" | "previewing" | "ready";
 
@@ -168,6 +141,16 @@ interface ActivePreviewRequest {
   readonly attempt: PreviewAttempt;
 }
 
+/** 当前仍有资格落地的 Cancel 请求身份。 */
+interface ActiveCancelRequest {
+  /** Workspace 内单调 Cancel token。 */
+  readonly token: number;
+  /** Cancel 所属的 Run generation。 */
+  readonly runGeneration: number;
+  /** Cancel 精确绑定的 Execution UUID。 */
+  readonly executionId: string;
+}
+
 /** 当前响应身份异常时使用的固定安全前端错误。 */
 const PREVIEW_IDENTITY_ERROR: ApiError = {
   code: "IPC_FAILED",
@@ -189,14 +172,13 @@ function runnerLabel(runner: CommandBlockSummary["runner"]): string {
   return runner === "windowsPowerShell" ? "Windows PowerShell" : "CMD";
 }
 
-/** 判断既有 Execution phase 是否必须锁定命令配置。 */
+/** 判断当前 Execution phase 是否必须锁定全部命令配置。 */
 function isExecutionActive(phase: WorkspacePhase): boolean {
   return phase === "starting" || phase === "running" || phase === "cancelling";
 }
 
-/** 渲染并控制 CMD-01 的真实固定任务工作区。 */
+/** 渲染并控制真实 Command Block 的 Preview 与 Execution 工作区。 */
 export function CommandWorkspace({
-  gateway = defaultGateway,
   commandGateway = defaultCommandGateway,
   folderPicker = defaultFolderPicker,
   windowControls = defaultWindowControls,
@@ -245,24 +227,24 @@ export function CommandWorkspace({
   const [error, setError] = useState<ApiError | null>(null);
   /** 防止重复提交取消请求的局部请求状态。 */
   const [cancelRequestPending, setCancelRequestPending] = useState(false);
+  /** Run 调用入口的同步互斥门禁，阻止同一 commit 内重复点击。 */
+  const runRequestPending = useRef(false);
   /** 每次 Run 递增，用于隔离旧 Channel 回调。 */
   const runGeneration = useRef(0);
   /** 当前 Channel 已绑定的 Execution UUID。 */
   const expectedExecutionId = useRef<string | null>(null);
   /** 当前 Execution 已接受的最大事件级 sequence。 */
   const lastSequence = useRef(-1);
-  /** 启动响应返回前暂存的 Channel 事件。 */
-  const pendingEvents = useRef<ExecutionStreamEvent[]>([]);
-  /** 当前预响应缓存的估算 UTF-8 负载字节数。 */
-  const pendingEventsBytes = useRef(0);
-  /** 按 Execution ID 隔离的预响应 Output 淘汰账本。 */
-  const pendingDroppedOutputBytes = useRef(new Map<string, number>());
+  /** Run 响应返回前的事件、Fragment、字节与按 ID 淘汰账本。 */
+  const pendingExecutionEvents = useRef(createPendingExecutionEventBuffer());
   /** 当前 Execution 是否已经接受唯一终态。 */
   const terminalAccepted = useRef(false);
   /** 与 React 状态同步的阶段快照，供异步响应防止状态倒退。 */
   const phaseSnapshot = useRef<WorkspacePhase>("ready");
-  /** 当前仍有权修改取消请求状态的 generation。 */
-  const cancelRequestGeneration = useRef<number | null>(null);
+  /** 为 Cancel 请求分配组件内唯一的单调 token。 */
+  const cancelRequestSequence = useRef(0);
+  /** 当前唯一仍有资格落地的 Cancel 请求。 */
+  const activeCancelRequest = useRef<ActiveCancelRequest | null>(null);
   /** 组件卸载后拒绝 List/Get 迟到结果。 */
   const mounted = useRef(false);
   /** 独立于 Execution 的 List 请求 generation。 */
@@ -282,8 +264,8 @@ export function CommandWorkspace({
   const activePreviewRequest = useRef<ActivePreviewRequest | null>(null);
   /** Strict Mode 下记录已经自动 Preview 的 Parameterless Definition generation。 */
   const parameterlessAutoPreviewGeneration = useRef<number | null>(null);
-  /** 与 React 状态同步的 ConfirmedPreview，供下一原子安全接线。 */
-  const confirmedPreviewSnapshot = useRef<ConfirmedPreview | null>(null);
+  /** 只允许一次同步消费的当前 ConfirmedPreview 执行授权。 */
+  const executablePreview = useRef<ConfirmedPreview | null>(null);
   /** 当前选择的 id/revision/generation 身份快照。 */
   const selectedDefinitionIdentity = useRef<{
     id: string;
@@ -294,7 +276,7 @@ export function CommandWorkspace({
   /** 清除当前 Preview 展示、授权和错误，不改变 Definition 或 Execution。 */
   const clearPreviewState = useCallback(() => {
     activePreviewRequest.current = null;
-    confirmedPreviewSnapshot.current = null;
+    executablePreview.current = null;
     setConfirmedPreview(null);
     setPreviewResponse(null);
     setPreviewError(null);
@@ -344,7 +326,10 @@ export function CommandWorkspace({
   }, []);
 
   /** 选择 Summary、建立独立 generation，并只接受完全匹配的 Details。 */
-  async function selectCommand(summary: CommandBlockSummary) {
+  async function selectCommand(
+    summary: CommandBlockSummary,
+    options: SelectCommandOptions = {},
+  ) {
     if (!commandGateway || isExecutionActive(phaseSnapshot.current)) {
       return;
     }
@@ -400,6 +385,9 @@ export function CommandWorkspace({
       }
       /** 当前身份已完整校验的 Definition。 */
       const acceptedDefinition = { details, generation };
+      if (options.suppressParameterlessAutoPreview) {
+        parameterlessAutoPreviewGeneration.current = generation;
+      }
       setLoadedDefinition(acceptedDefinition);
       if (details.parameters.length === 0) {
         /** Parameterless Definition 由 Workspace 建立当前双 generation 的空快照。 */
@@ -431,6 +419,68 @@ export function CommandWorkspace({
     }
   }
 
+  /** 重新读取 Summary，并按首选 ID 读取最新 Details 与 revision。 */
+  async function reloadCommandDefinitions(
+    preferredCommandId?: string,
+    suppressParameterlessAutoPreview = false,
+  ): Promise<void> {
+    if (!commandGateway) {
+      setCommandLoading(false);
+      return;
+    }
+    /** 本次 List 调用的独立 generation。 */
+    const generation = listGeneration.current + 1;
+    listGeneration.current = generation;
+    /** 身份恢复只在发起时的选择仍归它所有时才可重新选择，用户后续选择始终优先。 */
+    const recoveryOwnerIdentity =
+      preferredCommandId === undefined
+        ? null
+        : selectedDefinitionIdentity.current;
+    /** 统一判断当前 List 的成功或失败是否仍有资格修改工作区。 */
+    const canApplyReloadResult = (): boolean => {
+      /** 判断时重新读取当前身份，避免闭包保留发起恢复时的旧选择。 */
+      const currentIdentity = selectedDefinitionIdentity.current;
+      return (
+        mounted.current &&
+        listGeneration.current === generation &&
+        (recoveryOwnerIdentity === null ||
+          (currentIdentity?.id === recoveryOwnerIdentity.id &&
+            currentIdentity.revision === recoveryOwnerIdentity.revision &&
+            currentIdentity.generation === recoveryOwnerIdentity.generation))
+      );
+    };
+    setCommandLoading(true);
+    try {
+      /** Rust 固定顺序返回的最新公开摘要。 */
+      const summaries = await commandGateway.listCommandBlocks();
+      /** List generation 隔离新 List；身份快照隔离期间发生的手动命令切换。 */
+      if (!canApplyReloadResult()) {
+        return;
+      }
+      setCommandSummaries([...summaries]);
+      setCommandLoading(false);
+      /** 身份错误优先恢复原 ID，否则选择 Rust 当前第一项。 */
+      const nextSummary =
+        summaries.find((summary) => summary.id === preferredCommandId) ??
+        summaries[0];
+      if (nextSummary) {
+        void selectCommand(nextSummary, {
+          suppressParameterlessAutoPreview,
+        });
+      } else {
+        selectedDefinitionIdentity.current = null;
+        setSelectedCommandId(null);
+        setLoadedDefinition(null);
+        clearPreviewState();
+      }
+    } catch (loadError: unknown) {
+      if (canApplyReloadResult()) {
+        setCommandError(normalizeApiError(loadError));
+        setCommandLoading(false);
+      }
+    }
+  }
+
   /** 初次挂载只加载一次真实列表并选择第一项；卸载后 List/Get 均失效。 */
   useEffect(() => {
     mounted.current = true;
@@ -443,29 +493,17 @@ export function CommandWorkspace({
         configurationGeneration.current += 1;
         selectedDefinitionIdentity.current = null;
         activePreviewRequest.current = null;
+        executablePreview.current = null;
+        runRequestPending.current = false;
+        runGeneration.current += 1;
+        expectedExecutionId.current = null;
+        resetPendingExecutionEventBuffer(pendingExecutionEvents.current);
+        terminalAccepted.current = true;
+        activeCancelRequest.current = null;
+        cancelRequestSequence.current += 1;
       };
     }
-    const generation = listGeneration.current + 1;
-    listGeneration.current = generation;
-    setCommandLoading(true);
-    void commandGateway
-      .listCommandBlocks()
-      .then((summaries) => {
-        if (!mounted.current || listGeneration.current !== generation) {
-          return;
-        }
-        setCommandSummaries([...summaries]);
-        setCommandLoading(false);
-        if (summaries[0]) {
-          void selectCommand(summaries[0]);
-        }
-      })
-      .catch((loadError: unknown) => {
-        if (mounted.current && listGeneration.current === generation) {
-          setCommandError(loadError as ApiError);
-          setCommandLoading(false);
-        }
-      });
+    void reloadCommandDefinitions();
     return () => {
       mounted.current = false;
       listGeneration.current += 1;
@@ -473,6 +511,14 @@ export function CommandWorkspace({
       configurationGeneration.current += 1;
       selectedDefinitionIdentity.current = null;
       activePreviewRequest.current = null;
+      executablePreview.current = null;
+      runRequestPending.current = false;
+      runGeneration.current += 1;
+      expectedExecutionId.current = null;
+      resetPendingExecutionEventBuffer(pendingExecutionEvents.current);
+      terminalAccepted.current = true;
+      activeCancelRequest.current = null;
+      cancelRequestSequence.current += 1;
     };
   }, [commandGateway]);
 
@@ -480,46 +526,6 @@ export function CommandWorkspace({
   function transitionPhase(nextPhase: WorkspacePhase) {
     phaseSnapshot.current = nextPhase;
     setPhase(nextPhase);
-  }
-
-  /** 在有界分桶中记录一个被淘汰 Output 的文本和 Rust 已报告丢弃字节。 */
-  function recordPendingOutputDrop(event: ExecutionStreamEvent) {
-    if (event.event !== "output") {
-      return;
-    }
-    const { executionId: droppedExecutionId, droppedBytesBefore } = event.data;
-    const ledger = pendingDroppedOutputBytes.current;
-    if (!ledger.has(droppedExecutionId) && ledger.size >= PENDING_DROPPED_EXECUTION_LIMIT) {
-      const oldestExecutionId = ledger.keys().next().value as string | undefined;
-      if (oldestExecutionId) {
-        ledger.delete(oldestExecutionId);
-      }
-    }
-    ledger.set(
-      droppedExecutionId,
-      (ledger.get(droppedExecutionId) ?? 0) + pendingOutputBytes(event) + droppedBytesBefore,
-    );
-  }
-
-  /** 有界暂存响应前事件；超限时优先淘汰文本事件并保留生命周期事实。 */
-  function queuePendingEvent(event: ExecutionStreamEvent) {
-    pendingEvents.current.push(event);
-    pendingEventsBytes.current += pendingEventBytes(event);
-    while (
-      pendingEventsBytes.current > EXECUTION_OUTPUT_LIMIT_BYTES ||
-      pendingEvents.current.length > PENDING_EVENT_LIMIT
-    ) {
-      const outputIndex = pendingEvents.current.findIndex(
-        (candidate) => candidate.event === "output",
-      );
-      const removalIndex = outputIndex >= 0 ? outputIndex : 0;
-      const [removed] = pendingEvents.current.splice(removalIndex, 1);
-      if (!removed) {
-        break;
-      }
-      pendingEventsBytes.current -= pendingEventBytes(removed);
-      recordPendingOutputDrop(removed);
-    }
   }
 
   /** 按名称和说明过滤当前命令摘要。 */
@@ -593,7 +599,7 @@ export function CommandWorkspace({
     /** 当前请求的全部不可变身份。 */
     const request: ActivePreviewRequest = { token, attempt };
     activePreviewRequest.current = request;
-    confirmedPreviewSnapshot.current = null;
+    executablePreview.current = null;
     setConfirmedPreview(null);
     setPreviewResponse(null);
     setPreviewError(null);
@@ -618,10 +624,13 @@ export function CommandWorkspace({
         setPreviewPhase("configuring");
         return;
       }
-      confirmedPreviewSnapshot.current = acceptance.confirmedPreview;
+      executablePreview.current = acceptance.confirmedPreview;
       setConfirmedPreview(acceptance.confirmedPreview);
       setPreviewResponse(acceptance.confirmedPreview.response);
       setPreviewPhase("ready");
+      if (phaseSnapshot.current === "finished") {
+        transitionPhase("ready");
+      }
     } catch (requestError: unknown) {
       if (!isPreviewRequestCurrent(request)) {
         return;
@@ -675,13 +684,32 @@ export function CommandWorkspace({
     void requestPreviewFor(loadedDefinition, parameterState);
   }, [commandGateway, loadedDefinition, parameterState]);
 
-  /** 接受当前 Channel 的严格有序后端事件并更新可观察状态。 */
+  /** 立即撤销当前 Cancel 请求资格，供新 Run、终态、拒绝与卸载隔离迟到响应。 */
+  function invalidateCancelRequest(): void {
+    activeCancelRequest.current = null;
+    cancelRequestSequence.current += 1;
+    setCancelRequestPending(false);
+  }
+
+  /** 接受一个唯一后端终态，并让后续执行重新经过 Preview。 */
+  function acceptExecutionTerminal(resultSnapshot: ExecutionResult): void {
+    terminalAccepted.current = true;
+    runRequestPending.current = false;
+    resetPendingExecutionEventBuffer(pendingExecutionEvents.current);
+    invalidateCancelRequest();
+    clearPreviewState();
+    setError(null);
+    setResult(resultSnapshot);
+    transitionPhase("finished");
+  }
+
+  /** 接受当前 Channel 的 generation、ID、sequence 与唯一终态认证事件。 */
   function acceptExecutionEvent(event: ExecutionStreamEvent, generation: number) {
-    if (generation !== runGeneration.current) {
+    if (!mounted.current || generation !== runGeneration.current) {
       return;
     }
     if (expectedExecutionId.current === null) {
-      queuePendingEvent(event);
+      queuePendingExecutionEvent(pendingExecutionEvents.current, event);
       return;
     }
     const { executionId: eventExecutionId, sequence } = event.data;
@@ -696,7 +724,9 @@ export function CommandWorkspace({
 
     switch (event.event) {
       case "started":
-        transitionPhase("running");
+        if (phaseSnapshot.current === "starting") {
+          transitionPhase("running");
+        }
         return;
       case "output":
         setOutput((current) =>
@@ -709,124 +739,190 @@ export function CommandWorkspace({
         );
         return;
       case "finished":
-        terminalAccepted.current = true;
-        setResult({
+        acceptExecutionTerminal({
           kind: "finished",
           exitCode: event.data.exitCode,
           durationMs: event.data.durationMs,
           droppedOutputBytes: event.data.droppedOutputBytes,
         });
-        transitionPhase("finished");
         return;
       case "cancelled":
-        terminalAccepted.current = true;
-        setResult({
+        acceptExecutionTerminal({
           kind: "cancelled",
           durationMs: event.data.durationMs,
           droppedOutputBytes: event.data.droppedOutputBytes,
         });
-        transitionPhase("finished");
         return;
       case "failed":
-        terminalAccepted.current = true;
-        setResult({
+        acceptExecutionTerminal({
           kind: "failed",
           message: event.data.message,
           durationMs: event.data.durationMs,
           droppedOutputBytes: event.data.droppedOutputBytes,
         });
-        transitionPhase("finished");
     }
   }
 
-  /** 请求 Rust 启动固定验收任务；不传入任何脚本或进程参数。 */
-  async function startExecution() {
-    if (!gateway || phase === "starting" || phase === "running" || phase === "cancelling") {
+  /** 收敛当前 Run 拒绝，撤销全部执行资格并隔离同 Channel 的迟到事件。 */
+  function rejectExecutionRun(
+    generation: number,
+    rejectedPreview: ConfirmedPreview,
+    runError: unknown,
+  ): void {
+    if (!mounted.current || generation !== runGeneration.current) {
       return;
     }
+    /** 所有公开与未知拒绝都先经过固定白名单说明。 */
+    const normalizedError = normalizeApiError(runError);
+    runGeneration.current = generation + 1;
+    runRequestPending.current = false;
+    expectedExecutionId.current = null;
+    lastSequence.current = -1;
+    resetPendingExecutionEventBuffer(pendingExecutionEvents.current);
+    terminalAccepted.current = true;
+    invalidateCancelRequest();
+    clearPreviewState();
+    setExecutionId(null);
+    setOutput(createExecutionOutputBuffer());
+    setResult(null);
+    setError(normalizedError);
+    transitionPhase("ready");
+    if (
+      normalizedError.code === "COMMAND_BLOCK_NOT_FOUND" ||
+      normalizedError.code === "REVISION_CONFLICT"
+    ) {
+      void reloadCommandDefinitions(rejectedPreview.commandBlockId, true);
+    }
+  }
+
+  /** 同步消费当前 ConfirmedPreview，并请求 Rust 复验后创建通用 Execution。 */
+  async function startExecution(): Promise<void> {
+    /** 当前点击开始时仍未被任何异步边界消费的唯一授权。 */
+    const preview = executablePreview.current;
+    /** 当前选中 Definition 的完整身份。 */
+    const identity = selectedDefinitionIdentity.current;
+    if (
+      !commandGateway ||
+      !preview ||
+      runRequestPending.current ||
+      phaseSnapshot.current !== "ready" ||
+      preview.definitionGeneration !== definitionGeneration.current ||
+      preview.configurationGeneration !== configurationGeneration.current ||
+      identity?.id !== preview.commandBlockId ||
+      identity.revision !== preview.revision ||
+      identity.generation !== preview.definitionGeneration
+    ) {
+      return;
+    }
+    /** 只从确认快照再次深复制冻结的本次通用 Run 请求。 */
+    const request = createVerifyRunRequest(preview);
+    executablePreview.current = null;
+    runRequestPending.current = true;
+    activePreviewRequest.current = null;
+    setConfirmedPreview(null);
+    setPreviewResponse(null);
+    setPreviewError(null);
+    setExternalFieldError(null);
+    setPreviewPhase("configuring");
+    /** 本次 Channel 回调唯一允许落地的 Run generation。 */
     const generation = runGeneration.current + 1;
     runGeneration.current = generation;
     expectedExecutionId.current = null;
     lastSequence.current = -1;
-    pendingEvents.current = [];
-    pendingEventsBytes.current = 0;
-    pendingDroppedOutputBytes.current.clear();
+    resetPendingExecutionEventBuffer(pendingExecutionEvents.current);
     terminalAccepted.current = false;
-    cancelRequestGeneration.current = null;
-    setCancelRequestPending(false);
+    invalidateCancelRequest();
     setExecutionId(null);
     setOutput(createExecutionOutputBuffer());
     setResult(null);
     setError(null);
     transitionPhase("starting");
     try {
-      const response = await gateway.startFixedExecution((event) => {
+      /** Run 响应只建立可信 Execution ID；Started 只能由 Channel 事件推进。 */
+      const response = await commandGateway.runCommandBlock(request, (event) => {
         acceptExecutionEvent(event, generation);
       });
-      if (generation !== runGeneration.current) {
+      if (!mounted.current || generation !== runGeneration.current) {
         return;
       }
+      runRequestPending.current = false;
       expectedExecutionId.current = response.executionId;
       setExecutionId(response.executionId);
-      const bufferedEvents = pendingEvents.current;
-      pendingEvents.current = [];
-      pendingEventsBytes.current = 0;
-      const authenticatedDroppedBytes =
-        pendingDroppedOutputBytes.current.get(response.executionId) ?? 0;
+      /** 只把响应 ID 对应的淘汰字节与缓存事件交给当前 Execution。 */
+      const buffered = drainPendingExecutionEventBuffer(
+        pendingExecutionEvents.current,
+        response.executionId,
+      );
       setOutput({
         ...createExecutionOutputBuffer(),
-        droppedBytes: authenticatedDroppedBytes,
+        droppedBytes: buffered.droppedOutputBytes,
       });
-      pendingDroppedOutputBytes.current.clear();
-      for (const event of bufferedEvents) {
+      for (const event of buffered.events) {
         acceptExecutionEvent(event, generation);
       }
-    } catch (startError: unknown) {
-      if (
-        generation === runGeneration.current &&
-        expectedExecutionId.current === null
-      ) {
-        pendingEvents.current = [];
-        pendingEventsBytes.current = 0;
-        pendingDroppedOutputBytes.current.clear();
-        setError(startError as ApiError);
-        transitionPhase("ready");
-      }
+    } catch (runError: unknown) {
+      rejectExecutionRun(generation, preview, runError);
     }
   }
 
-  /** 请求 Rust 按当前 Execution UUID 终止整个 Job。 */
-  async function cancelExecution() {
-    if (!gateway || !executionId || phase !== "running" || cancelRequestPending) {
+  /** 请求 Rust 按已认证的 Execution UUID 终止整个 Job。 */
+  async function cancelExecution(): Promise<void> {
+    /** 只从 Run 响应建立的可信 ID 读取取消目标。 */
+    const targetExecutionId = expectedExecutionId.current;
+    /** Cancel 只在 Starting 已有 ID 或 Running 阶段开放。 */
+    const currentPhase = phaseSnapshot.current;
+    if (
+      !commandGateway ||
+      !targetExecutionId ||
+      activeCancelRequest.current !== null ||
+      terminalAccepted.current ||
+      (currentPhase !== "starting" && currentPhase !== "running")
+    ) {
       return;
     }
+    /** 当前 Cancel 严格绑定的 Run generation。 */
     const generation = runGeneration.current;
-    const targetExecutionId = executionId;
-    cancelRequestGeneration.current = generation;
+    /** 本次 Cancel 的组件内唯一 token。 */
+    const token = cancelRequestSequence.current + 1;
+    cancelRequestSequence.current = token;
+    /** 在任何 await 前占用同步门禁，阻止同一 commit 内双击。 */
+    const request: ActiveCancelRequest = {
+      token,
+      runGeneration: generation,
+      executionId: targetExecutionId,
+    };
+    activeCancelRequest.current = request;
     setCancelRequestPending(true);
     setError(null);
     try {
-      const response = await gateway.cancelExecution(targetExecutionId);
+      const response = await commandGateway.cancelExecution(targetExecutionId);
       if (
-        generation === runGeneration.current &&
-        targetExecutionId === expectedExecutionId.current &&
-        !terminalAccepted.current &&
-        phaseSnapshot.current === "running" &&
-        response.state === "cancelling"
+        activeCancelRequest.current !== request ||
+        generation !== runGeneration.current ||
+        targetExecutionId !== expectedExecutionId.current ||
+        terminalAccepted.current
+      ) {
+        return;
+      }
+      if (
+        response.state === "cancelling" &&
+        (phaseSnapshot.current === "starting" ||
+          phaseSnapshot.current === "running")
       ) {
         transitionPhase("cancelling");
       }
     } catch (cancelError: unknown) {
       if (
+        activeCancelRequest.current === request &&
         generation === runGeneration.current &&
         targetExecutionId === expectedExecutionId.current &&
         !terminalAccepted.current
       ) {
-        setError(cancelError as ApiError);
+        setError(normalizeApiError(cancelError));
       }
     } finally {
-      if (cancelRequestGeneration.current === generation) {
-        cancelRequestGeneration.current = null;
+      if (activeCancelRequest.current === request) {
+        activeCancelRequest.current = null;
         setCancelRequestPending(false);
       }
     }
@@ -839,12 +935,12 @@ export function CommandWorkspace({
 
   /** 返回当前阶段的用户可读状态。 */
   function phaseLabel(): string {
-    if (!gateway) return commandGateway ? "Run 尚未接线" : "需要桌面宿主";
+    if (!commandGateway) return "需要桌面宿主";
     if (phase === "starting") return "正在建立执行";
     if (phase === "running") return "运行中";
     if (phase === "cancelling") return "正在终止进程树";
     if (phase === "finished") return "执行已结束";
-    return "可以运行";
+    return confirmedPreview ? "可以运行" : "等待 Preview";
   }
 
   /** 执行窗口外壳动作并隔离其失败，避免污染 Execution 业务状态。 */
@@ -1062,16 +1158,16 @@ export function CommandWorkspace({
                 <div className="identity-note"><ArrowBendRightDownIcon className="annotation-arrow" size={72} weight="thin" aria-hidden="true" /><div><strong>可信来源</strong><p>名称、说明、Runner、Origin、Risk 和 revision 只来自当前 Summary/Details。</p><p>切换命令会完整重建表单，不继承旧参数。</p></div></div>
               </section>
               <section className="runner-note"><h2>当前 Definition</h2><dl><div><dt>Origin</dt><dd>{currentCommand?.origin ?? "—"}</dd></div><div><dt>Runner</dt><dd>{currentCommand ? runnerLabel(currentCommand.runner) : "—"}</dd></div><div><dt>Risk</dt><dd>{currentCommand?.riskLevel ?? "—"}</dd></div><div><dt>Revision</dt><dd>{currentCommand?.revision ?? "—"}</dd></div></dl><p className="runner-scope">{loadedDefinition && parameterValueCount !== null ? `${parameterValueCount} 个 wire key · ${parameterState.status === "ready" && parameterState.snapshot.isValid ? "UX valid" : "UX invalid"}` : "参数快照正在同步"}</p></section>
-              <section className="preflight-note"><h2><PencilSimpleLineIcon size={17} aria-hidden="true" />可信 Preview</h2><ul><li>Zod 只提供即时 UX</li><li>规范化与 Safety 只来自 Rust</li><li>Hash 覆盖完整 Artifact</li></ul><p className="risk-callout">本阶段只确认 Preview；通用 Run 与 Channel 尚未接线。</p></section>
+              <section className="preflight-note"><h2><PencilSimpleLineIcon size={17} aria-hidden="true" />可信 Preview</h2><ul><li>Zod 只提供即时 UX</li><li>规范化与 Safety 只来自 Rust</li><li>Hash 覆盖完整 Artifact</li></ul><p className="risk-callout">每次 Run 只消费一次当前 Hash；结束或拒绝后必须重新生成 Preview。</p></section>
               <section className="revision-note"><h2>Execution 内核</h2><p>阶段：{phase}</p><p>{phaseLabel()}</p><p>Output：最多 512 KiB</p></section>
             </aside>
           </div>
 
           <footer className="workspace-actions">
-            <div className="execution-summary"><TerminalWindowIcon size={22} weight="light" aria-hidden="true" /><span>{gateway ? phase === "finished" ? "既有 Execution 内核已收到唯一后端终态，可再次运行回归任务。" : "既有固定 Execution 测试接缝保持回归；通用 Preview 与它正交。" : confirmedPreview ? "当前 Rust Preview 已绑定不可变参数快照与完整 Execution Spec Hash；Run 将在下一原子接线。" : previewResponse?.safety.state === "blocked" ? "Rust Safety 已拦截当前 Preview；不会形成可执行授权。" : commandGateway ? "填写有效参数并生成 Rust Preview；当前阶段不会启动命令。" : "当前是纯浏览器环境；可以查看降级状态，但不能请求桌面 Preview。"}</span></div>
+            <div className="execution-summary"><TerminalWindowIcon size={22} weight="light" aria-hidden="true" /><span>{phase === "finished" ? "当前 Execution 已收到唯一后端终态；重新 Preview 后才可再次执行。" : isExecutionActive(phase) ? "当前 Execution 由 Rust Channel 推进；配置保持锁定直到唯一终态。" : confirmedPreview ? "当前 Rust Preview 已绑定不可变参数快照与完整 Execution Spec Hash，可执行一次。" : previewResponse?.safety.state === "blocked" ? "Rust Safety 已拦截当前 Preview；不会形成可执行授权。" : commandGateway ? "填写有效参数并生成 Rust Preview；Run 不接受脚本或进程参数。" : "当前是纯浏览器环境；可以查看降级状态，但不能请求桌面 Preview 或 Run。"}</span></div>
             <div className="action-buttons">
-              {gateway ? <button type="button" className="secondary-button" onClick={clearOutput} disabled={output.chunks.length === 0}>清空输出</button> : <button type="button" className="secondary-button" onClick={requestCurrentPreview} disabled={!canRequestPreview}>{previewPhase === "previewing" ? "正在生成 Preview" : previewError || previewResponse?.safety.state === "blocked" ? "重试 Preview" : confirmedPreview ? "重新生成 Preview" : "生成 Preview"}</button>}
-              {phase === "running" || phase === "cancelling" ? <button type="button" className="cancel-button" onClick={cancelExecution} disabled={phase === "cancelling" || cancelRequestPending}><XIcon size={18} aria-hidden="true" />{phase === "cancelling" ? "正在终止" : cancelRequestPending ? "正在请求" : "终止任务"}</button> : gateway ? <button type="button" className="primary-button" onClick={startExecution} disabled={phase === "starting"}><TerminalWindowIcon size={19} aria-hidden="true" />{phase === "starting" ? "正在启动" : phase === "finished" ? "再次运行" : "运行验收任务"}</button> : confirmedPreview ? <button type="button" className="primary-button" disabled><TerminalWindowIcon size={19} aria-hidden="true" />{confirmedPreview.response.actionLabel}</button> : !commandGateway ? <button type="button" className="primary-button" disabled><TerminalWindowIcon size={19} aria-hidden="true" />需要桌面宿主</button> : null}
+              {commandGateway ? <button type="button" className="secondary-button" onClick={requestCurrentPreview} disabled={!canRequestPreview}>{previewPhase === "previewing" ? "正在生成 Preview" : previewError || previewResponse?.safety.state === "blocked" ? "重试 Preview" : confirmedPreview || phase === "finished" ? "重新生成 Preview" : "生成 Preview"}</button> : null}
+              {(phase === "starting" && executionId) || phase === "running" || phase === "cancelling" ? <button type="button" className="cancel-button" onClick={cancelExecution} disabled={phase === "cancelling" || cancelRequestPending}><XIcon size={18} aria-hidden="true" />{phase === "cancelling" ? "正在终止" : cancelRequestPending ? "正在请求" : "终止任务"}</button> : phase === "starting" ? <button type="button" className="primary-button" disabled><TerminalWindowIcon size={19} aria-hidden="true" />正在启动</button> : confirmedPreview && phase === "ready" ? <button type="button" className="primary-button" onClick={startExecution}><TerminalWindowIcon size={19} aria-hidden="true" />{confirmedPreview.response.actionLabel}</button> : !commandGateway ? <button type="button" className="primary-button" disabled><TerminalWindowIcon size={19} aria-hidden="true" />需要桌面宿主</button> : null}
             </div>
           </footer>
         </section>
