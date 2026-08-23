@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cmdbox_lib::execution::artifact::PowerShellArtifact;
+use cmdbox_lib::execution::artifact::{MaterializedScript, RenderedScript};
 use cmdbox_lib::process::windows::managed_process::ManagedProcess;
 use cmdbox_lib::process::windows::runner::WindowsPowerShellRunner;
 
@@ -24,8 +24,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d /c ping -t 127.0.0.1' -PassThru; Set-Content -LiteralPath '{escaped_child_pid_file}' -Value $child.Id; Wait-Process -Id $child.Id"
     );
     let runner = WindowsPowerShellRunner::resolve()?;
-    let artifact = PowerShellArtifact::create(&script)?;
-    let managed = ManagedProcess::spawn(&runner, artifact, &std::env::temp_dir())?;
+    let rendered = RenderedScript::windows_powershell(&script);
+    let artifact = MaterializedScript::create(rendered)?;
+    let launch = runner.process_launch(artifact, &std::env::temp_dir());
+    let managed = ManagedProcess::spawn(launch)?;
     fs::write(
         control_directory.join("root.pid"),
         managed.process_id().to_string(),

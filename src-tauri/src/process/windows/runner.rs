@@ -1,7 +1,8 @@
-//! Windows PowerShell 5.1 Runner 解析与参数构造。
+//! Windows PowerShell 5.1 Runner 解析与字段私有的进程启动值构造。
 //!
 //! 本文件通过 Windows 系统目录 API 解析绝对可执行文件，不读取可变 `PATH`，并集中维护
-//! CmdBox 一次性非交互 PowerShell 任务的固定启动参数。这里只描述调用，不创建进程。
+//! CmdBox 一次性非交互 PowerShell 任务的固定启动参数。`ResolvedRunner` 只接受受管临时
+//! 脚本租约并生成 `ProcessLaunch`，后者是 Win32 进程模块唯一消费的内部启动接缝。
 
 use std::error::Error;
 use std::ffi::OsString;
@@ -11,6 +12,8 @@ use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+use crate::execution::artifact::{ArtifactError, MaterializedScript};
 
 /// Windows 系统目录 API 的初始缓冲区长度。
 const INITIAL_SYSTEM_DIRECTORY_BUFFER: usize = 260;
@@ -82,16 +85,37 @@ impl RunnerType {
     }
 }
 
-/// 系统自带 Windows PowerShell 5.1 的确定性调用描述。
+/// 系统自带 Windows PowerShell 5.1 的确定性解析入口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowsPowerShellRunner;
+
+/// 已确定可执行文件与固定参数、尚未绑定临时脚本路径的 Runner。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WindowsPowerShellRunner {
+pub struct ResolvedRunner {
+    /// 不随环境或 PATH 改变的 Runner 类型。
+    runner_type: RunnerType,
     /// 由 Windows 系统目录推导出的绝对可执行文件路径。
     executable: PathBuf,
+    /// 脚本路径之前的固定参数，顺序属于 Runner 执行语义。
+    arguments_before_script: Vec<OsString>,
+}
+
+/// 字段私有、已绑定受管脚本租约与完整 Win32 启动参数的进程启动值。
+#[derive(Debug)]
+pub struct ProcessLaunch {
+    /// CreateProcessW 使用的确定性绝对可执行文件路径。
+    executable: PathBuf,
+    /// 包含固定 Runner 选项与受管脚本路径的完整 argv。
+    arguments: Vec<OsString>,
+    /// 由上层 Execution 选择、仍需进程内核验证的工作目录。
+    working_directory: PathBuf,
+    /// 保持临时脚本及其唯一目录到受管进程生命周期结束的 RAII 租约。
+    materialized_script: MaterializedScript,
 }
 
 impl WindowsPowerShellRunner {
     /// 从 Windows 系统目录解析 PowerShell 5.1，不读取 `PATH` 或自动切换到 PowerShell 7。
-    pub fn resolve() -> Result<Self, RunnerResolveError> {
+    pub fn resolve() -> Result<ResolvedRunner, RunnerResolveError> {
         let system_directory = system_directory()?;
         let executable = WINDOWS_POWERSHELL_RELATIVE_PATH
             .iter()
@@ -112,12 +136,25 @@ impl WindowsPowerShellRunner {
             return Err(RunnerResolveError::ExecutableUnavailable(executable));
         }
 
-        Ok(Self { executable })
+        Ok(ResolvedRunner {
+            runner_type: RunnerType::WindowsPowerShell,
+            executable,
+            arguments_before_script: vec![
+                OsString::from("-NoLogo"),
+                OsString::from("-NoProfile"),
+                OsString::from("-NonInteractive"),
+                OsString::from("-ExecutionPolicy"),
+                OsString::from("Bypass"),
+                OsString::from("-File"),
+            ],
+        })
     }
+}
 
+impl ResolvedRunner {
     /// 返回稳定 Runner 类型，避免上层根据 Rust 具体类型重复推断协议标识。
     pub const fn runner_type(&self) -> RunnerType {
-        RunnerType::WindowsPowerShell
+        self.runner_type
     }
 
     /// 返回确定的 Windows PowerShell 可执行文件绝对路径。
@@ -125,17 +162,48 @@ impl WindowsPowerShellRunner {
         &self.executable
     }
 
-    /// 为一个已经生成的 `.ps1` 文件构造固定、非交互且不加载用户 Profile 的参数。
-    pub fn script_arguments(&self, script_path: &Path) -> Vec<OsString> {
-        vec![
-            OsString::from("-NoLogo"),
-            OsString::from("-NoProfile"),
-            OsString::from("-NonInteractive"),
-            OsString::from("-ExecutionPolicy"),
-            OsString::from("Bypass"),
-            OsString::from("-File"),
-            script_path.as_os_str().to_owned(),
-        ]
+    /// 绑定一个受管临时脚本与工作目录，生成字段私有的完整进程启动值。
+    pub fn process_launch(
+        self,
+        materialized_script: MaterializedScript,
+        working_directory: &Path,
+    ) -> ProcessLaunch {
+        let arguments = self.script_arguments(materialized_script.script_path());
+        ProcessLaunch {
+            executable: self.executable,
+            arguments,
+            working_directory: working_directory.to_path_buf(),
+            materialized_script,
+        }
+    }
+
+    /// 为一个受管脚本路径追加固定、非交互且不加载用户 Profile 的完整参数。
+    fn script_arguments(&self, script_path: &Path) -> Vec<OsString> {
+        let mut arguments = self.arguments_before_script.clone();
+        arguments.push(script_path.as_os_str().to_owned());
+        arguments
+    }
+}
+
+impl ProcessLaunch {
+    /// 返回 CreateProcessW 使用的确定性绝对可执行文件路径。
+    pub(crate) fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    /// 返回已经包含受管脚本路径的完整 Runner 参数。
+    pub(crate) fn arguments(&self) -> &[OsString] {
+        &self.arguments
+    }
+
+    /// 返回调用方选择且由进程内核再次验证的工作目录。
+    pub(crate) fn working_directory(&self) -> &Path {
+        &self.working_directory
+    }
+
+    /// 紧邻 CreateProcessW 前复验当前启动值持有的脚本字节 Hash。
+    pub(crate) fn verify_before_spawn(&self) -> Result<(), ArtifactError> {
+        self.materialized_script.verify_before_spawn()
     }
 }
 
@@ -167,10 +235,10 @@ mod tests {
     //! Windows PowerShell Runner 的真实系统解析与稳定参数测试。
 
     use std::ffi::{OsStr, OsString};
-    use std::path::Path;
     use std::sync::Mutex;
 
     use super::{RunnerType, WindowsPowerShellRunner};
+    use crate::execution::artifact::{MaterializedScript, RenderedScript};
 
     /// 串行保护进程级 `PATH` 修改，避免本模块测试彼此污染。
     static PATH_ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
@@ -239,10 +307,17 @@ mod tests {
     #[test]
     fn builds_stable_non_interactive_script_arguments() {
         let runner = WindowsPowerShellRunner::resolve().expect("系统应提供 Windows PowerShell");
-        let script_path = Path::new(r"C:\Temp\CmdBox\execution-id\script.ps1");
+        let artifact = MaterializedScript::create(RenderedScript::windows_powershell("exit 0"))
+            .expect("应创建测试脚本");
+        let script_path = artifact.script_path().to_path_buf();
+        let working_directory = std::env::temp_dir();
+        let executable = runner.executable().to_path_buf();
+        let launch = runner.process_launch(artifact, &working_directory);
 
+        assert_eq!(launch.executable(), executable);
+        assert_eq!(launch.working_directory(), working_directory);
         assert_eq!(
-            runner.script_arguments(script_path),
+            launch.arguments(),
             vec![
                 OsString::from("-NoLogo"),
                 OsString::from("-NoProfile"),

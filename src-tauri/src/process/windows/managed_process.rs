@@ -1,8 +1,10 @@
 //! Windows Job Object 受管进程的创建、等待与整树终止。
 //!
-//! 本文件直接使用 Win32 `CreateProcessW`，先挂起创建 PowerShell，再加入设置了
+//! 本文件只消费字段私有的 `ProcessLaunch`，直接使用 Win32 `CreateProcessW` 先挂起创建
+//! 已解析进程，再加入设置了
 //! `KILL_ON_JOB_CLOSE` 的独立 Job，最后恢复主线程，从根源上避免简单 spawn 后分配 Job 的
-//! 子进程逃逸竞态。stdout/stderr 管道和取消句柄可在 Resume 前交给 Session 完成预绑定。
+//! 子进程逃逸竞态。Runner、脚本类型和临时 Artifact 均封装在启动值内；stdout/stderr 管道
+//! 和取消句柄可在 Resume 前交给 Session 完成预绑定。
 
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -35,8 +37,8 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus};
 
-use crate::execution::artifact::{ArtifactError, PowerShellArtifact};
-use crate::process::windows::runner::WindowsPowerShellRunner;
+use crate::execution::artifact::ArtifactError;
+use crate::process::windows::runner::ProcessLaunch;
 
 /// CmdBox 主动取消 Job 时使用的进程退出码。
 pub(crate) const CMDBOX_CANCEL_EXIT_CODE: u32 = 0xC000_013A;
@@ -54,7 +56,7 @@ pub enum ManagedProcessOperation {
     ConfigureJob,
     /// 创建并关联 Job 完成端口。
     ConfigureCompletionPort,
-    /// 以挂起状态创建 PowerShell 进程。
+    /// 以挂起状态创建已解析的受管进程。
     CreateProcess,
     /// 把挂起进程分配到 Job。
     AssignProcess,
@@ -241,9 +243,9 @@ impl Drop for PendingStartupProcess {
 /// 父进程持有的 stdout/stderr Pipe 读端。
 #[derive(Debug)]
 pub struct CapturedOutput {
-    /// PowerShell stdout 的唯一读端。
+    /// 受管进程 stdout 的唯一读端。
     stdout: std::fs::File,
-    /// PowerShell stderr 的唯一读端。
+    /// 受管进程 stderr 的唯一读端。
     stderr: std::fs::File,
 }
 
@@ -436,8 +438,8 @@ pub struct PreparedManagedProcess {
     pending: PendingStartupProcess,
     /// 与取消入口共享的 KILL_ON_JOB_CLOSE Job。
     job: Arc<KillOnCloseJob>,
-    /// 保持临时脚本直到受管进程生命周期结束。
-    artifact: PowerShellArtifact,
+    /// 保持完整启动参数与临时脚本租约直到受管进程生命周期结束。
+    launch: ProcessLaunch,
     /// Resume 前即可交给输出 Reader 的 stdout/stderr 读端。
     output: Option<CapturedOutput>,
 }
@@ -473,7 +475,7 @@ impl PreparedManagedProcess {
             process,
             job: self.job,
             process_id,
-            _artifact: self.artifact,
+            _launch: self.launch,
         })
     }
 }
@@ -487,67 +489,44 @@ pub struct ManagedProcess {
     job: Arc<KillOnCloseJob>,
     /// 根进程的系统 PID，只用于观测和测试，不提供按 PID 终止入口。
     process_id: u32,
-    /// 保持临时脚本到进程对象结束，防止运行期间被提前清理。
-    _artifact: PowerShellArtifact,
+    /// 保持完整启动值与临时脚本租约到进程对象结束，防止运行期间被提前清理。
+    _launch: ProcessLaunch,
 }
 
 impl ManagedProcess {
     /// 复验 Artifact，并按“挂起创建 → 分配 Job → 恢复线程”的固定顺序启动进程。
-    pub fn spawn(
-        runner: &WindowsPowerShellRunner,
-        artifact: PowerShellArtifact,
-        working_directory: &Path,
-    ) -> Result<Self, ManagedProcessError> {
-        Self::prepare_with_job_assignment(
-            runner,
-            artifact,
-            working_directory,
-            |job, process, _process_id| job.assign(process),
-        )?
-        .resume()
+    pub fn spawn(launch: ProcessLaunch) -> Result<Self, ManagedProcessError> {
+        Self::prepare_with_job_assignment(launch, |job, process, _process_id| job.assign(process))?
+            .resume()
     }
 
     /// 复验 Artifact，挂起创建并加入 Job，但把 Resume 留给会话层完成预绑定后调用。
-    pub fn prepare(
-        runner: &WindowsPowerShellRunner,
-        artifact: PowerShellArtifact,
-        working_directory: &Path,
-    ) -> Result<PreparedManagedProcess, ManagedProcessError> {
-        Self::prepare_with_job_assignment(
-            runner,
-            artifact,
-            working_directory,
-            |job, process, _process_id| job.assign(process),
-        )
+    pub fn prepare(launch: ProcessLaunch) -> Result<PreparedManagedProcess, ManagedProcessError> {
+        Self::prepare_with_job_assignment(launch, |job, process, _process_id| job.assign(process))
     }
 
     /// 使用给定 Job 分配动作完成受管启动；测试可注入 Assign 失败以证明守卫会清理 PID。
     fn prepare_with_job_assignment<F>(
-        runner: &WindowsPowerShellRunner,
-        artifact: PowerShellArtifact,
-        working_directory: &Path,
+        launch: ProcessLaunch,
         assign: F,
     ) -> Result<PreparedManagedProcess, ManagedProcessError>
     where
         F: FnOnce(&KillOnCloseJob, HANDLE, u32) -> Result<(), ManagedProcessError>,
     {
-        if !working_directory.is_absolute() || !working_directory.is_dir() {
+        if !launch.working_directory().is_absolute() || !launch.working_directory().is_dir() {
             return Err(ManagedProcessError::InvalidWorkingDirectory {
-                path: working_directory.to_path_buf(),
+                path: launch.working_directory().to_path_buf(),
             });
         }
 
         // 完整性复验必须紧邻创建 Job/Process，失败时不会取得任何可运行进程资源。
-        artifact
+        launch
             .verify_before_spawn()
             .map_err(ManagedProcessError::Artifact)?;
         let job = Arc::new(KillOnCloseJob::create()?);
-        let mut command_line = build_command_line(
-            runner.executable(),
-            &runner.script_arguments(artifact.script_path()),
-        );
-        let application_name = wide_null_terminated(runner.executable().as_os_str());
-        let current_directory = wide_null_terminated(working_directory.as_os_str());
+        let mut command_line = build_command_line(launch.executable(), launch.arguments());
+        let application_name = wide_null_terminated(launch.executable().as_os_str());
+        let current_directory = wide_null_terminated(launch.working_directory().as_os_str());
         let mut startup_info: STARTUPINFOW = unsafe { zeroed() };
         startup_info.cb = size_of::<STARTUPINFOW>() as u32;
         let pipes = StandardPipes::create()?;
@@ -557,8 +536,8 @@ impl ManagedProcess {
         startup_info.hStdInput = pipes.stdin_read.raw();
         let mut process_info: PROCESS_INFORMATION = unsafe { zeroed() };
 
-        // SAFETY: 路径缓冲区均以 NUL 结尾并在调用期间有效；命令行是可写 UTF-16；不继承
-        // Handle；STARTUPINFO/PROCESS_INFORMATION 尺寸正确。进程以挂起状态返回。
+        // SAFETY: 路径缓冲区均以 NUL 结尾并在调用期间有效；命令行是可写 UTF-16；只继承
+        // 标准流中显式保留继承位的 Handle；结构体尺寸正确。进程以挂起状态返回。
         let created = unsafe {
             CreateProcessW(
                 application_name.as_ptr(),
@@ -584,7 +563,7 @@ impl ManagedProcess {
         Ok(PreparedManagedProcess {
             pending,
             job,
-            artifact,
+            launch,
             output: Some(output),
         })
     }
@@ -748,12 +727,20 @@ mod tests {
     use super::{
         ManagedProcess, ManagedProcessError, ManagedProcessOperation, PROCESS_SYNCHRONIZE_ACCESS,
     };
-    use crate::execution::artifact::PowerShellArtifact;
-    use crate::process::windows::runner::WindowsPowerShellRunner;
+    use crate::execution::artifact::{ArtifactError, MaterializedScript, RenderedScript};
+    use crate::process::windows::runner::{ProcessLaunch, WindowsPowerShellRunner};
 
     /// PowerShell 进程使用的安全临时工作目录。
     fn safe_working_directory() -> std::path::PathBuf {
         std::env::temp_dir()
+    }
+
+    /// 为测试脚本文本构造与正式 Session 相同的字段私有 PowerShell 启动值。
+    fn powershell_launch(script: &str, working_directory: &Path) -> ProcessLaunch {
+        let runner = WindowsPowerShellRunner::resolve().expect("系统应提供 Windows PowerShell");
+        let rendered = RenderedScript::windows_powershell(script);
+        let artifact = MaterializedScript::create(rendered).expect("应创建测试脚本");
+        runner.process_launch(artifact, working_directory)
     }
 
     /// 在限定时间内等待测试脚本写出子进程 PID。
@@ -789,29 +776,51 @@ mod tests {
     /// 验证 Exit Code 0 的固定脚本可自然结束。
     #[test]
     fn managed_process_waits_for_natural_exit() {
-        let runner = WindowsPowerShellRunner::resolve().expect("系统应提供 Windows PowerShell");
-        let artifact = PowerShellArtifact::create("exit 0").expect("应创建测试脚本");
         let working_directory = safe_working_directory();
-        let process =
-            ManagedProcess::spawn(&runner, artifact, &working_directory).expect("应启动受管进程");
+        let launch = powershell_launch("exit 0", &working_directory);
+        let process = ManagedProcess::spawn(launch).expect("应启动受管进程");
 
         assert_eq!(process.wait().expect("应等待自然退出"), 0);
+    }
+
+    /// 验证启动值持有的脚本被篡改时不会创建进程，并由失败路径精确清理其唯一目录。
+    #[test]
+    fn rejects_tampered_process_launch_and_cleans_owned_artifact() {
+        let runner = WindowsPowerShellRunner::resolve().expect("系统应提供 Windows PowerShell");
+        let rendered = RenderedScript::windows_powershell("exit 0");
+        let artifact = MaterializedScript::create(rendered).expect("应创建测试脚本");
+        let execution_directory = artifact
+            .script_path()
+            .parent()
+            .expect("测试脚本应位于唯一目录")
+            .to_path_buf();
+        fs::write(artifact.script_path(), b"exit 9").expect("测试应能篡改临时脚本");
+        let working_directory = safe_working_directory();
+        let launch = runner.process_launch(artifact, &working_directory);
+
+        let result = ManagedProcess::spawn(launch);
+
+        assert!(matches!(
+            result,
+            Err(ManagedProcessError::Artifact(
+                ArtifactError::IntegrityMismatch { .. }
+            ))
+        ));
+        assert!(!execution_directory.exists(), "失败时应清理当前唯一目录");
     }
 
     /// 验证 TerminateJobObject 会同时终止 PowerShell 根进程和它创建的子进程。
     #[test]
     fn terminate_job_stops_root_and_child_process() {
-        let runner = WindowsPowerShellRunner::resolve().expect("系统应提供 Windows PowerShell");
         let pid_file =
             std::env::temp_dir().join(format!("cmdbox-child-{}.pid", uuid::Uuid::new_v4()));
         let escaped_pid_file = pid_file.to_string_lossy().replace('\'', "''");
         let script = format!(
             "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d /c ping -t 127.0.0.1' -PassThru; Set-Content -LiteralPath '{escaped_pid_file}' -Value $child.Id; Wait-Process -Id $child.Id"
         );
-        let artifact = PowerShellArtifact::create(&script).expect("应创建测试脚本");
         let working_directory = safe_working_directory();
-        let process =
-            ManagedProcess::spawn(&runner, artifact, &working_directory).expect("应启动受管进程");
+        let launch = powershell_launch(&script, &working_directory);
+        let process = ManagedProcess::spawn(launch).expect("应启动受管进程");
         let root_pid = process.process_id();
         let child_pid = wait_for_pid_file(&pid_file);
 
@@ -825,24 +834,18 @@ mod tests {
     /// 验证 Job 分配失败时启动守卫会终止尚未受管的挂起 PowerShell，不留下孤立 PID。
     #[test]
     fn assign_failure_terminates_pending_suspended_process() {
-        let runner = WindowsPowerShellRunner::resolve().expect("系统应提供 Windows PowerShell");
-        let artifact =
-            PowerShellArtifact::create("Start-Sleep -Seconds 60").expect("应创建测试脚本");
         let working_directory = safe_working_directory();
+        let launch = powershell_launch("Start-Sleep -Seconds 60", &working_directory);
         let captured_pid = AtomicU32::new(0);
 
-        let result = ManagedProcess::prepare_with_job_assignment(
-            &runner,
-            artifact,
-            &working_directory,
-            |_job, _process, process_id| {
+        let result =
+            ManagedProcess::prepare_with_job_assignment(launch, |_job, _process, process_id| {
                 captured_pid.store(process_id, Ordering::SeqCst);
                 Err(ManagedProcessError::Win32 {
                     operation: ManagedProcessOperation::AssignProcess,
                     source: io::Error::other("测试注入 Job 分配失败"),
                 })
-            },
-        );
+            });
 
         assert!(matches!(
             result,

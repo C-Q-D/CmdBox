@@ -321,7 +321,7 @@ mod tests {
         coordinate_output, IngressMessage, OutputCapture, OutputStream, Utf8StreamDecoder,
         DELIVERY_CAPACITY,
     };
-    use crate::execution::artifact::PowerShellArtifact;
+    use crate::execution::artifact::{MaterializedScript, RenderedScript};
     use crate::process::windows::managed_process::ManagedProcess;
     use crate::process::windows::runner::WindowsPowerShellRunner;
 
@@ -393,9 +393,10 @@ mod tests {
     fn captures_real_powershell_stdout_and_stderr_as_text() {
         let script = "$utf8 = New-Object System.Text.UTF8Encoding($false); [Console]::OutputEncoding = $utf8; $stdin = [Console]::In.ReadToEnd(); [Console]::Out.WriteLine('标准输出中文'); [Console]::Out.WriteLine(\"stdin=$($stdin.Length)\"); [Console]::Error.WriteLine('标准错误中文')";
         let runner = WindowsPowerShellRunner::resolve().expect("系统应提供 Windows PowerShell");
-        let artifact = PowerShellArtifact::create(script).expect("应创建测试脚本");
-        let mut prepared = ManagedProcess::prepare(&runner, artifact, &std::env::temp_dir())
-            .expect("应准备受管 PowerShell");
+        let rendered = RenderedScript::windows_powershell(script);
+        let artifact = MaterializedScript::create(rendered).expect("应创建测试脚本");
+        let launch = runner.process_launch(artifact, &std::env::temp_dir());
+        let mut prepared = ManagedProcess::prepare(launch).expect("应准备受管 PowerShell");
         let capture = OutputCapture::start(prepared.take_output().expect("应取得输出 Pipe"));
         let process = prepared.resume().expect("应恢复受管 PowerShell");
 
@@ -430,9 +431,10 @@ mod tests {
     fn slow_consumer_does_not_block_high_volume_process_output() {
         let script = "$utf8 = New-Object System.Text.UTF8Encoding($false); [Console]::OutputEncoding = $utf8; 1..200000 | ForEach-Object { [Console]::Out.WriteLine('0123456789abcdef') }";
         let runner = WindowsPowerShellRunner::resolve().expect("系统应提供 Windows PowerShell");
-        let artifact = PowerShellArtifact::create(script).expect("应创建测试脚本");
-        let mut prepared = ManagedProcess::prepare(&runner, artifact, &std::env::temp_dir())
-            .expect("应准备受管 PowerShell");
+        let rendered = RenderedScript::windows_powershell(script);
+        let artifact = MaterializedScript::create(rendered).expect("应创建测试脚本");
+        let launch = runner.process_launch(artifact, &std::env::temp_dir());
+        let mut prepared = ManagedProcess::prepare(launch).expect("应准备受管 PowerShell");
         let capture = OutputCapture::start(prepared.take_output().expect("应取得输出 Pipe"));
         let process = prepared.resume().expect("应恢复受管 PowerShell");
         let started = Instant::now();

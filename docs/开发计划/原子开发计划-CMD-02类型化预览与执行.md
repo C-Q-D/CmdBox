@@ -42,13 +42,13 @@ CMD02-TEMPLATE-01┘                                      │
 
 ## CMD02-LAUNCH-01 收敛受管脚本启动接缝
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：现有固定 PowerShell 验收任务继续自然结束、输出、取消和整树清理，同时进程内核不再依赖具体 Shell 类型。
 - 唯一目标：让 `ManagedProcess` 只消费一个已解析的 `ProcessLaunch`。
 - 当前行为与目标行为：当前 `ManagedProcess::prepare` 直接接收 `WindowsPowerShellRunner` 与 `PowerShellArtifact`；完成后 Runner 解析、最终脚本字节、临时脚本租约和 Win32 启动参数在进程内核外收敛，现有 CMD-01 行为保持等价。
 - 前置条件与依赖：CMD-01 已完成；无本计划内依赖。
 - 代码定位依据：`execution/artifact.rs`、`process/windows/runner.rs`、`process/windows/managed_process.rs`、`execution/session.rs` 和 `tests/managed_process_windows.rs`。
-- 允许修改：上述 Rust 文件及其直接测试。
+- 允许修改：上述 Rust 文件及其直接测试；现有 `execution/output.rs` 测试和 `bin/cmdbox-job-test-helper.rs` 只允许机械迁移到新启动值。
 - 明确不修改：Tauri IPC、React、Command Block、Typed Parameter、CMD Runner 和用户可见行为。
 - 实现步骤：把最终编码后的脚本字节与脚本类型建模为受控值；临时文件固定扩展名、随机目录、Flush、Hash 复验和 RAII 清理；建立字段私有的 `ResolvedRunner`/`ProcessLaunch`；使 `ManagedProcess` 只负责 CreateProcessW、Pipe、Job、Resume 和终止；用现有固定入口构造等价 PowerShell Launch。
 - 接口、数据与错误契约：最终 Artifact Hash 覆盖实际落盘字节；随机临时路径不进入执行语义；IPC 无法构造 `ProcessLaunch`。
@@ -62,6 +62,11 @@ CMD02-TEMPLATE-01┘                                      │
 - 风险等级：L2
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`refactor(core): [CMD02-LAUNCH-01] 收敛受管脚本启动接缝`
+
+### 执行记录
+
+- 实际验证：Artifact 4 项、Runner 3 项、ManagedProcess 4 项、Session 6 项窄测通过；完整 Rust 单元测试 26 项、Windows 强退集成 1 项通过；`cargo fmt --check`、严格 Clippy、`git diff --check` 通过；限定提交前复核为 `PASS`。
+- 计划偏差：现有 Output 真实进程测试和 feature-gated Job helper 直接调用旧入口，为保持编译与原测试语义，对两个调用方做了仅参数构造的机械迁移。
 
 ## CMD02-TEMPLATE-01 建立类型化参数与受限模板
 

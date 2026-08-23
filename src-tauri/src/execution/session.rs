@@ -2,6 +2,7 @@
 //!
 //! Session 在恢复进程前完成事件队列、输出 Reader、Active 索引和取消入口绑定。运行线程只
 //! 负责等待根进程、关闭 Job、等待输出 Drain 完成并发布唯一终态，不持有 Manager 全局锁。
+//! 固定入口先冻结最终脚本字节，再解析 Runner、创建临时租约并交付字段私有 `ProcessLaunch`。
 
 use std::collections::VecDeque;
 use std::error::Error;
@@ -13,7 +14,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::execution::artifact::{ArtifactError, PowerShellArtifact};
+use crate::execution::artifact::{ArtifactError, MaterializedScript, RenderedScript};
 use crate::execution::manager::{
     lock_unpoisoned, ActiveExecution, ExecutionControlState, ExecutionId, ExecutionManager,
 };
@@ -333,16 +334,18 @@ impl ExecutionManager {
         working_directory: &Path,
     ) -> Result<StartedExecution, ExecutionStartError> {
         let execution_id = ExecutionId::new_v4();
+        let rendered = RenderedScript::windows_powershell(script);
         let runner = WindowsPowerShellRunner::resolve().map_err(ExecutionStartError::Runner)?;
-        let artifact = PowerShellArtifact::create(script).map_err(ExecutionStartError::Artifact)?;
+        let artifact =
+            MaterializedScript::create(rendered).map_err(ExecutionStartError::Artifact)?;
         #[cfg(test)]
         let temporary_directory = artifact
             .script_path()
             .parent()
             .expect("Artifact 脚本必须位于唯一临时目录")
             .to_path_buf();
-        let mut prepared = ManagedProcess::prepare(&runner, artifact, working_directory)
-            .map_err(ExecutionStartError::Process)?;
+        let launch = runner.process_launch(artifact, working_directory);
+        let mut prepared = ManagedProcess::prepare(launch).map_err(ExecutionStartError::Process)?;
         let process_id = prepared.process_id();
         let output = prepared
             .take_output()
