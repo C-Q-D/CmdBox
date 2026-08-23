@@ -1,8 +1,9 @@
 /** Command Workspace 的宿主降级、执行事件、取消和错误状态测试。 */
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CommandWorkspace } from "../features/command-workspace/CommandWorkspace";
 import type { ExecutionStreamEvent, FixedExecutionGateway } from "../features/command-workspace/execution-gateway";
+import type { DesktopWindowControls } from "../features/command-workspace/desktop-window-controls";
 import App from "./App";
 
 /** 每个测试后卸载 React 树，避免 Channel 回调和 DOM 状态串扰。 */
@@ -85,6 +86,29 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     expect(screen.getByLabelText("Command Block 索引")).toBeDefined();
     expect(screen.getAllByText("需要桌面宿主").length).toBeGreaterThan(0);
     expect((screen.getByRole("button", { name: "运行验收任务" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "最小化窗口" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "最大化或还原窗口" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "关闭窗口" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("把唯一标题栏的三个按钮映射到最小当前窗口能力", function controlDesktopWindow() {
+    const windowControls: DesktopWindowControls = {
+      /** 记录最小化动作。 */
+      minimize: vi.fn(async () => undefined),
+      /** 记录最大化切换动作。 */
+      toggleMaximize: vi.fn(async () => undefined),
+      /** 记录普通关闭动作。 */
+      close: vi.fn(async () => undefined),
+    };
+    render(<CommandWorkspace gateway={null} windowControls={windowControls} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "最小化窗口" }));
+    fireEvent.click(screen.getByRole("button", { name: "最大化或还原窗口" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭窗口" }));
+
+    expect(windowControls.minimize).toHaveBeenCalledOnce();
+    expect(windowControls.toggleMaximize).toHaveBeenCalledOnce();
+    expect(windowControls.close).toHaveBeenCalledOnce();
   });
 
   it("按命令名称过滤索引并呈现无结果状态", function filterCommandIndex() {

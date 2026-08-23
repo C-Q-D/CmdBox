@@ -75,7 +75,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 20px;
+  padding: 0 0 0 20px;
   border-bottom: 1px solid var(--rule);
   background: rgba(248, 245, 239, 0.72);
 }
@@ -130,9 +130,39 @@ button {
 }
 
 .window-caption {
-  gap: 30px;
+  align-self: stretch;
   color: #3b3a37;
   font-size: 18px;
+}
+
+.caption-button {
+  width: 46px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: default;
+}
+
+.caption-button:hover:not(:disabled) {
+  background: rgba(26, 26, 24, 0.08);
+}
+
+.caption-button--close:hover:not(:disabled) {
+  background: #c42b1c;
+  color: #fff;
+}
+
+.caption-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+
+.caption-button:disabled {
+  opacity: 0.45;
 }
 
 .workspace-grid {

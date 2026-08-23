@@ -41,9 +41,16 @@ import {
   createExecutionOutputBuffer,
   EXECUTION_OUTPUT_LIMIT_BYTES,
 } from "./execution-output-buffer";
+import {
+  createDesktopWindowControls,
+  type DesktopWindowControls,
+} from "./desktop-window-controls";
 
 /** 浏览器加载时解析一次真实桌面 Gateway；非 Tauri 环境保持 `null`。 */
 const defaultGateway = createFixedExecutionGateway();
+
+/** 浏览器加载时解析一次当前窗口控制；非 Tauri 环境保持 `null`。 */
+const defaultWindowControls = createDesktopWindowControls();
 
 /** 启动响应前最多缓存的事件数，限制无文本元数据事件的内存占用。 */
 const PENDING_EVENT_LIMIT = 2048;
@@ -78,6 +85,8 @@ function pendingOutputBytes(event: ExecutionStreamEvent): number {
 export interface CommandWorkspaceProps {
   /** 固定任务 IPC；`null` 表示当前不是 Tauri 桌面宿主。 */
   gateway?: FixedExecutionGateway | null;
+  /** 当前桌面主窗口控制；`null` 表示普通浏览器预览。 */
+  windowControls?: DesktopWindowControls | null;
 }
 
 /** 前端根据后端事实派生的当前界面阶段。 */
@@ -126,6 +135,7 @@ function CommandSummaryIcon({ icon }: Pick<CommandSummary, "icon">) {
 /** 渲染并控制 CMD-01 的真实固定任务工作区。 */
 export function CommandWorkspace({
   gateway = defaultGateway,
+  windowControls = defaultWindowControls,
 }: CommandWorkspaceProps) {
   /** 当前命令索引搜索词。 */
   const [query, setQuery] = useState("");
@@ -391,18 +401,29 @@ export function CommandWorkspace({
     return "可以运行";
   }
 
+  /** 执行窗口外壳动作并隔离其失败，避免污染 Execution 业务状态。 */
+  function runWindowAction(action: () => Promise<void>) {
+    void action().catch(() => undefined);
+  }
+
   return (
     <main className="prototype-shell">
-      <header className="window-bar">
-        <div className="brand-lockup">
+      <header className="window-bar" data-tauri-drag-region="deep">
+        <div className="brand-lockup" data-tauri-drag-region="deep">
           <img src={cmdboxIcon} alt="" className="brand-mark" />
           <span className="brand-name">CmdBox</span>
           <span className="version-mark">v0.1.0</span>
         </div>
-        <div className="window-caption" aria-hidden="true">
-          <MinusIcon size={16} weight="light" />
-          <SquareIcon size={13} weight="light" />
-          <XIcon size={16} weight="light" />
+        <div className="window-caption" aria-label="窗口控制">
+          <button type="button" className="caption-button" aria-label="最小化窗口" data-tauri-drag-region="false" disabled={!windowControls} onClick={() => windowControls && runWindowAction(windowControls.minimize)}>
+            <MinusIcon size={16} weight="light" aria-hidden="true" />
+          </button>
+          <button type="button" className="caption-button" aria-label="最大化或还原窗口" data-tauri-drag-region="false" disabled={!windowControls} onClick={() => windowControls && runWindowAction(windowControls.toggleMaximize)}>
+            <SquareIcon size={13} weight="light" aria-hidden="true" />
+          </button>
+          <button type="button" className="caption-button caption-button--close" aria-label="关闭窗口" data-tauri-drag-region="false" disabled={!windowControls} onClick={() => windowControls && runWindowAction(windowControls.close)}>
+            <XIcon size={16} weight="light" aria-hidden="true" />
+          </button>
         </div>
       </header>
 
