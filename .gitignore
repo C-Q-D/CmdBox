@@ -4,6 +4,7 @@ Desktop.ini
 .DS_Store
 .idea/
 .vscode/
+.worktree/
 
 # 后续前端、Rust 与 Tauri 构建产物
 node_modules/

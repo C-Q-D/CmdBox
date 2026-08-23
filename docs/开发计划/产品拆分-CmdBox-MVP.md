@@ -81,7 +81,7 @@
 
 ## CMD-02 通过 Typed Parameter 预览并执行 PowerShell/CMD 命令
 
-- 状态：pending
+- 状态：in_progress
 - 用户或业务价值：用户只填写业务参数即可得到准确、可读且不会因引号错误改变语义的命令 Preview，并以声明的 PowerShell 或 CMD Runner 实际执行。
 - 参与者：Windows 用户、Command Block 作者。
 - 触发与前置条件：Execution Core 可以运行固定脚本；存在内置 Command Block Draft。
@@ -173,8 +173,8 @@
 # 下一步
 
 - 最近完成：`CMD-01`；`ATOMIC-CMD-01-UI-001` 的四个原子均已验证并同步远端。
-- 下一推荐：`CMD-02`，先规划 Typed Parameter、Preview Hash、PowerShell/CMD Serializer 和最小真实 UI 路径；当前不自动进入实现。
-- 当前停止条件：等待用户检查 `CMD-01` 结果并授权下一产品单元。
+- 当前进行中：`CMD-02`，按 `ATOMIC-CMD-02-001` 连续实现 Typed Parameter、Preview Hash、PowerShell/CMD Serializer 和最小真实 UI 路径。
+- 当前停止条件：出现会改变产品结果、需要危险命令或无法在无副作用验收中证明的阻塞。
 
 # 计划变更记录
 
