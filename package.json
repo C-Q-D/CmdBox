@@ -13,17 +13,20 @@
     "build": "pnpm typecheck && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "contract:generate": "cargo test --manifest-path src-tauri/Cargo.toml typescript_contract::regenerates_checked_in_typescript_contract -- --exact --ignored",
+    "contract:check": "cargo test --manifest-path src-tauri/Cargo.toml typescript_contract::generated_typescript_contract_is_current -- --exact",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "check:fast": "pnpm typecheck && pnpm test",
     "check:web": "pnpm check:fast && vite build",
-    "check:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo test --manifest-path src-tauri/Cargo.toml",
+    "check:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo test --manifest-path src-tauri/Cargo.toml --features process-test-helper",
     "check": "pnpm check:web && pnpm check:rust"
   },
   "dependencies": {
     "@phosphor-icons/react": "2.1.10",
     "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-dialog": "2.7.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

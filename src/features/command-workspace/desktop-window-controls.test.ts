@@ -20,7 +20,7 @@ describe("CmdBox desktop window contract", function describeDesktopWindowContrac
     });
   });
 
-  it("主窗口只开放自定义标题栏需要的五项权限", function keepWindowPermissionsMinimal() {
+  it("主窗口只开放标题栏与目录 Open 所需权限", function keepWindowPermissionsMinimal() {
     const capability = readJson("../../../src-tauri/capabilities/default.json") as {
       windows: string[];
       permissions: string[];
@@ -32,6 +32,7 @@ describe("CmdBox desktop window contract", function describeDesktopWindowContrac
       "core:window:allow-internal-toggle-maximize",
       "core:window:allow-close",
       "core:window:allow-start-dragging",
+      "dialog:allow-open",
     ]);
   });
 });

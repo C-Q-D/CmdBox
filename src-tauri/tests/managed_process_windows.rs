@@ -3,7 +3,7 @@
 //! 测试在独立 helper 进程中持有 Job Handle，再由外部测试进程强制结束 helper，最终通过
 //! Win32 同步句柄确认 PowerShell 根进程与 CMD 子进程都已经退出。
 
-#![cfg(windows)]
+#![cfg(all(windows, feature = "process-test-helper"))]
 
 use std::fs;
 use std::path::Path;

@@ -33,7 +33,7 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 - 日常小步验证：`pnpm check:fast`；提交前完整验证：`pnpm check`；完整 `pnpm tauri build` 只用于里程碑或发布。
 - `src/` 修改走 Vite HMR，`src-tauri/src/` 修改走 Tauri Watch + Cargo Incremental；不要为普通源码修改手工重建 Bundle。
 - 开发命令、依赖指纹、日志、故障处理和实测耗时统一见[开发环境与日常开发](docs/development/开发环境与日常开发.md)。
-- 当前已实现并实测 `CMD-01` 固定无破坏任务闭环：真实 React Workspace 可经窄 Typed IPC 启动、观察和取消 Rust Core 管理的 Windows PowerShell 任务；永久删除、Typed Parameter、通用 Preview、History 和持久化仍未实现。
+- `CMD-01` 固定无破坏任务闭环已实现并实测。`CMD-02` 已完成 6/9 个原子：Rust Core 已具备六类 Typed Parameter、受限模板、可信 Preview/Run 复验、PowerShell/CMD 确定执行，前端已接入 Rust 生成契约、五命令 Gateway 和最小目录 Open；统一参数表单、Preview/Run 主流程仍在实现。永久删除、History 和持久化尚未实现。
 
 ## 不得破坏的全局约束
 
@@ -82,7 +82,7 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 ## 实现与文档同步
 
 - 用户授权实现后，从活动计划中选择依赖已满足的推荐单元，不按前端、Rust、数据库横向拆成无法验收的半成品。
-- `CMD-01` 已完成；当前无进行中代码单元。下一推荐为 `CMD-02`，必须等待用户检查并明确授权后再进入规划或实现。
+- `CMD-01` 已完成；用户已授权连续实现 `CMD-02` 并允许在项目内 `.worktree/` 并行。当前活动原子为 `CMD02-UI-FORM-01`，完成后依次进入 `CMD02-UI-PREVIEW-01` 和 `CMD02-UI-RUN-01`；真实命令测试继续只允许回显、参数展示和短等待。
 - 每个交付单元进入实现前，先规划最终用户流程和可观察结果。
 - 实际实现、自动测试和真实宿主验证完成后，更新测试证据、项目工作台、阶段记录和计划单元状态。
 - GitHub 公开仓库为 `https://github.com/C-Q-D/CmdBox`；每次完成有效改动并形成独立提交后，立即推送当前分支到对应远端跟踪分支。推送前必须完成适用验证并检查本次改动不含凭据或私有数据。

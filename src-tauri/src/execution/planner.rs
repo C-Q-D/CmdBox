@@ -1,7 +1,7 @@
 //! Command Block Definition、可信 Preview 与 Run 复验的唯一业务入口。
 //!
 //! `ExecutionPlanner` 每次都从当前 Rust Built-in 集合重新读取 Definition，再通过同一条
-//! Validation → Template AST → PowerShell Serializer → Canonical Execution Spec 路径工作。
+//! Validation → Template AST → Runner Serializer → Canonical Execution Spec 路径工作。
 //! 本模块只做计算和必要的系统 Runner 解析，不创建临时脚本或进程；只有 Hash 与 revision
 //! 同时匹配时才产出字段私有、调用方无法自行构造的 `VerifiedExecution`。
 
@@ -48,11 +48,14 @@ const PREVIEW_TEXT_MAX_BYTES: usize = 32 * 1024;
 
 /// Preview 请求，只允许提交业务身份、期望 revision 和结构化参数。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreviewCommandRequest {
     /// 用户当前打开的 Command Block ID。
     pub command_block_id: String,
     /// 用户基于的 Definition revision。
+    #[cfg_attr(test, ts(type = "number"))]
     pub expected_revision: u64,
     /// 尚未信任、必须由 Rust Core 验证的结构化参数值。
     pub parameter_values: ParameterValues,
@@ -60,11 +63,14 @@ pub struct PreviewCommandRequest {
 
 /// Run 复验请求，只增加用户确认的完整 Execution Spec Hash。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VerifyRunRequest {
     /// 用户要执行的 Command Block ID。
     pub command_block_id: String,
     /// 用户 Preview 时确认的 Definition revision。
+    #[cfg_attr(test, ts(type = "number"))]
     pub expected_revision: u64,
     /// 必须重新验证、规范化和渲染的原始结构化参数值。
     pub parameter_values: ParameterValues,
@@ -77,6 +83,8 @@ pub struct VerifyRunRequest {
 /// DTO 故意不含模板、可执行文件、Runner options、工作目录或环境变量，避免列表 IPC 将
 /// Rust Core 内部执行定义泄露给 WebView。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct CommandBlockSummary {
     /// Command Block 的稳定身份。
@@ -92,6 +100,7 @@ pub struct CommandBlockSummary {
     /// normal 或 destructive 风险语义。
     pub risk_level: RiskLevel,
     /// 当前 Definition revision。
+    #[cfg_attr(test, ts(type = "number"))]
     pub revision: u64,
 }
 
@@ -115,6 +124,8 @@ impl From<&CommandBlockDefinition> for CommandBlockSummary {
 /// Details 在 Summary 字段之外只增加 Parameter Definition；固定模板继续保留在 Rust Core，
 /// 前端不能读取、修改或回传模板以绕过 Planner。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct CommandBlockDetails {
     /// Command Block 的稳定身份。
@@ -130,6 +141,7 @@ pub struct CommandBlockDetails {
     /// normal 或 destructive 风险语义。
     pub risk_level: RiskLevel,
     /// 当前 Definition revision。
+    #[cfg_attr(test, ts(type = "number"))]
     pub revision: u64,
     /// 按统一 Command Workspace 顺序返回的类型化参数定义。
     pub parameters: Vec<super::parameter::ParameterDefinition>,
@@ -153,6 +165,8 @@ impl From<&CommandBlockDefinition> for CommandBlockDetails {
 
 /// Rust Core 为一个 Parameter Definition 生成的有界规范化摘要。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewParameterSummary {
     /// 对应 Parameter Definition 的稳定 key。
@@ -162,6 +176,7 @@ pub struct PreviewParameterSummary {
     /// 已规范化值的有界可读文本，顺序与 Rust 规范化结果一致。
     pub display_values: Vec<String>,
     /// 未受展示截断影响的完整值数量；标量存在时为一。
+    #[cfg_attr(test, ts(type = "number"))]
     pub total_count: u64,
     /// 值数量或任一显示值是否因上限而截断。
     pub truncated: bool,
@@ -169,6 +184,8 @@ pub struct PreviewParameterSummary {
 
 /// Safety Decision 当前可序列化的稳定状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub enum PreviewSafetyState {
     /// 当前 normal Built-in 不适用路径安全策略。
@@ -183,6 +200,8 @@ pub enum PreviewSafetyState {
 
 /// 一条由 Rust Safety Guard 生成的稳定警告；当前 normal Built-in 不返回任何项。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewSafetyWarning {
     /// 前端可以稳定匹配的警告码。
@@ -193,6 +212,8 @@ pub struct PreviewSafetyWarning {
 
 /// Rust Core 对当前完整规范作出的结构化安全结论。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewSafetyDecision {
     /// 当前 Safety Policy 的结构化结果。
@@ -205,19 +226,23 @@ pub struct PreviewSafetyDecision {
 
 /// 用户可以检查且后续 Run 必须完整复验的 Command Preview。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewCommandResponse {
     /// 当前 Preview 对应的 Command Block ID。
     pub command_block_id: String,
     /// 当前 Preview 对应的 Definition revision。
+    #[cfg_attr(test, ts(type = "number"))]
     pub revision: u64,
     /// 由当前 Definition 声明且由 Rust 解析的 Runner 类型。
     pub runner: RunnerType,
     /// Rust 规范化参数的有界可读摘要。
     pub parameter_summaries: Vec<PreviewParameterSummary>,
-    /// 不含编码 BOM 的有界可读 PowerShell 脚本文本。
+    /// 不含编码前导的有界可读 Runner 脚本文本。
     pub preview_text: String,
-    /// 包含 UTF-8 BOM 的完整最终 Artifact 字节数。
+    /// 完整最终 Artifact 字节数；编码和 BOM 由当前 Runner 契约决定。
+    #[cfg_attr(test, ts(type = "number"))]
     pub full_size_bytes: u64,
     /// `preview_text` 是否因展示上限而被截断。
     pub truncated: bool,
@@ -319,7 +344,7 @@ impl Error for PlannerError {}
 /// 所有字段均保持私有；外部调用方只能由 `ExecutionPlanner::verify_run` 获得该值，不能把
 /// 请求 JSON、Preview 文本或任意脚本直接构造成已验证执行。
 pub struct VerifiedExecution {
-    /// 对完整最终字节冻结的 PowerShell Script Artifact。
+    /// 对完整最终字节冻结的 Runner Script Artifact。
     rendered_script: RenderedScript,
     /// 与 Hash 中可执行文件和固定 options 相同的确定 Runner。
     resolved_runner: ResolvedRunner,

@@ -8,6 +8,7 @@ Desktop.ini
 
 # 后续前端、Rust 与 Tauri 构建产物
 node_modules/
+.pnpm-store/
 dist/
 target/
 src-tauri/target/

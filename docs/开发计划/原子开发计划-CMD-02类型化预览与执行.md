@@ -183,19 +183,19 @@ CMD02-TEMPLATE-01┘                                      │
 
 ## CMD02-UI-CONTRACT-01 接入前端契约与目录选择
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：前端能读取后端 Definition/Preview/Run 类型并通过原生对话框选择一个或多个目录，但尚不改工作区主流程。
 - 唯一目标：建立 TypeScript Gateway 和可注入 `FolderPicker` 两个窄接缝。
-- 当前行为与目标行为：当前 Gateway 只启动固定任务；完成后镜像 Rust serde，官方目录对话框只开放 Open 能力。
+- 当前行为与目标行为：当前 Gateway 只启动固定任务；完成后由 Rust serde 稳定生成 TypeScript Contract，官方目录对话框只开放 Open 能力。
 - 前置条件与依赖：`CMD02-CMD-01` 的 Rust serde 契约已冻结。
-- 代码定位依据：`execution-gateway.ts/test.ts`、新增 parameter contract/folder picker、`package.json`、`Cargo.toml`、`lib.rs`、Capability。
+- 代码定位依据：Rust serde DTO 与 TypeScript Contract 生成入口、`src/generated/`、`execution-gateway.ts/test.ts`、新增 folder picker、`package.json`、`Cargo.toml`、`lib.rs`、Capability。
 - 允许修改：前端契约、Gateway、Dialog Plugin 最小注册与测试。
 - 明确不修改：Command Workspace 状态机、表单 UI、Preview 展示和 Execution 行为。
-- 实现步骤：按 Rust 字段镜像 discriminated unions；Gateway 提供 list/get/preview/run/cancel；Run 内部创建 Channel；官方 Dialog Plugin 只开放 `dialog:allow-open`；FolderPicker 单选/多选取消返回 null；浏览器环境不可用。
+- 实现步骤：从 Rust serde Struct/Enum 生成 discriminated unions 并校验生成文件无漂移；Gateway 提供 list/get/preview/run/cancel；Run 内部创建 Channel；官方 Dialog Plugin 只开放 `dialog:allow-open`；FolderPicker 单选/多选取消返回 null；浏览器环境不可用。
 - 接口、数据与错误契约：请求不能出现 script/executable/PID/options；错误只接受稳定白名单字段；未知拒绝值不回显对象。
 - 边界与异常：不开放 save/message/fs/shell/opener；选择路径不在前端读取或规范化。
 - 测试要求：五个 IPC 命令名与参数精确、Channel 创建、浏览器降级、错误白名单、Folder/Folders 选择和取消。
-- 验证命令：Gateway/Picker Vitest、TypeScript typecheck、Rust plugin 编译检查。
+- 验证命令：Contract 生成/漂移检查、Gateway/Picker Vitest、TypeScript typecheck、Rust plugin 编译检查。
 - 预期结果：前端得到真实业务 Contract，但现有 CMD-01 工作区仍可编译运行。
 - 完成判定：契约测试证明没有任意执行或文件访问入口。
 - 交付给下一原子的输出：`CommandExecutionGateway`、Parameter types 和 `FolderPicker`。
@@ -204,17 +204,23 @@ CMD02-TEMPLATE-01┘                                      │
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(ui): [CMD02-UI-CONTRACT-01] 接入命令契约与目录选择`
 
+### 执行记录
+
+- 实际验证：Rust serde DTO 通过 `ts-rs 12.0.1` 固定根白名单生成唯一 `src/generated/contracts.ts`，普通测试只在独占临时目录生成并执行只读漂移比较；Gateway/FolderPicker 窄测 11 项、完整前端测试 27 项、Rust 单元测试 80 项与 Windows 集成测试 1 项通过，`pnpm typecheck`、Vite 构建、契约漂移、`cargo fmt --check`、strict Clippy、普通应用构建和 `git diff --check` 均通过。
+- 权限与边界：正式前端只保留 list/get/preview/run/cancel 五个 IPC 命令，只有 Run 创建 Channel；旧固定命令名已从生产源码移除。Dialog Plugin 仅开放 `dialog:allow-open`，未开放 save/message/fs/shell/opener，Picker 不读取、规范化、去重或重排路径。
+- 计划偏差：总体技术设计要求 Rust serde 是前端 Contract 单一真值，因此没有手写平行 TypeScript 模型；改用仅测试构建生效的生成与漂移门禁。首次限定复核发现测试注入路径仍可触达已删除旧命令，删除该生产旁路并补五命令回归后复核结论为 `PASS`。主工作树的全新 Cargo Target 回归还发现 `pnpm check` 未启用 Windows 集成测试所需 helper feature；现已让完整门禁显式启用该 feature，并让普通无 feature 的 `cargo test` 不误运行缺少 helper 的测试。连续回归同时复现了慢消费者测试依赖固定 2 秒等待的时序假设，改为在全程零消费条件下限时等待 Session 关闭后再验证容量、终态和丢弃字节，保留且强化原背压不变量。
+
 ## CMD02-UI-FORM-01 渲染统一类型化参数表单
 
-- 状态：pending
+- 状态：in_progress
 - 支持的验收场景：用户可切换两个真实 Built-in，并按 Definition 填写六类参数。
 - 唯一目标：让 Command Workspace 由后端 Summary/Definition 驱动统一 Parameter Form。
 - 当前行为与目标行为：当前索引是静态 Fixture 且只有固定项可用；完成后只显示后端真实 Built-in，使用同一表单映射，不执行或 Preview。
 - 前置条件与依赖：`CMD02-UI-CONTRACT-01`。
-- 代码定位依据：`CommandWorkspace.tsx`、`command-data.ts`、新增 `ParameterForm.tsx`、`App.css`、`App.test.tsx`。
-- 允许修改：Definition/选择/表单相关 React、CSS 和测试。
+- 代码定位依据：`CommandWorkspace.tsx`、`command-data.ts`、新增 `ParameterForm.tsx`、`App.css`、`App.test.tsx`、`package.json` 和 `pnpm-lock.yaml`。
+- 允许修改：Definition/选择/表单相关 React、CSS、测试，以及技术设计已指定但尚未安装的 React Hook Form 与 Zod 精确依赖。
 - 明确不修改：Preview、Run/Cancel/Output 内核、命令专属页面或布局 DSL。
-- 实现步骤：加载真实 Summary 并选中第一项；切换时按 generation 丢弃迟到 Definition；用默认值初始化；固定 switch 映射六种控件；Folder/Folders 调用 Picker；参数变化立即清空旧 Preview 契约状态；Execution 活跃时禁用切换和输入。
+- 实现步骤：安装并精确锁定 React Hook Form 与 Zod；加载真实 Summary 并选中第一项；切换时按 generation 丢弃迟到 Definition；用 Definition 默认值初始化 React Hook Form；由 Definition 构造只用于即时 UX 的 Zod 校验，Rust 仍是权威；固定 switch 映射六种控件；Folder/Folders 调用 Picker；参数变化保持 configuring 且不制造虚假 Preview；Execution 活跃时禁用切换和输入。
 - 接口、数据与错误契约：Parameter 顺序、label、description、required 和约束只来自 Definition；前端可做即时 UX 校验但 Rust 仍是权威。
 - 边界与异常：对话框取消不改变值；Folders 可移除；搜索只过滤真实 Summary；不显示虚假总数或未接入命令。
 - 测试要求：两个 Block 切换、六控件、默认值/约束、Picker 取消/选择/移除、搜索、迟到 Definition、运行中只读和参数变化失效。

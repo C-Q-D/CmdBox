@@ -19,6 +19,8 @@ pub type ParameterValues = BTreeMap<String, ParameterValue>;
 
 /// 不依赖 `serde_json` 的完整 JSON 值语义，用于在 Rust Core 内继续执行类型化校验。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(untagged)]
 pub enum ParameterValue {
     /// JSON `null`。
@@ -37,6 +39,8 @@ pub enum ParameterValue {
 
 /// 六类 Parameter Definition 共享的业务元数据。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct ParameterBase {
     /// 在一个 Command Block 内唯一且可被受限模板引用的稳定 key。
@@ -53,6 +57,8 @@ pub struct ParameterBase {
 
 /// Text 参数的长度和默认值约束。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct TextParameterDefinition {
     /// Text 参数共享元数据。
@@ -70,6 +76,8 @@ pub struct TextParameterDefinition {
 
 /// Number 参数的有限值、范围和步长约束。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct NumberParameterDefinition {
     /// Number 参数共享元数据。
@@ -87,6 +95,8 @@ pub struct NumberParameterDefinition {
 
 /// Boolean 参数及其明确默认值。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct BooleanParameterDefinition {
     /// Boolean 参数共享元数据。
@@ -98,6 +108,8 @@ pub struct BooleanParameterDefinition {
 
 /// Select 参数的固定选项集合。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct SelectParameterDefinition {
     /// Select 参数共享元数据。
@@ -111,6 +123,8 @@ pub struct SelectParameterDefinition {
 
 /// Folder 参数的绝对目录约束。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct FolderParameterDefinition {
     /// Folder 参数共享元数据。
@@ -124,6 +138,8 @@ pub struct FolderParameterDefinition {
 
 /// Folders 参数的绝对目录数组和数量约束。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct FoldersParameterDefinition {
     /// Folders 参数共享元数据。
@@ -141,6 +157,8 @@ pub struct FoldersParameterDefinition {
 
 /// 当前 CMD-02 原子支持的六类 Parameter Definition。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ParameterDefinition {
     /// 单个文本值。

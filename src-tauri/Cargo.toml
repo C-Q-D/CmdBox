@@ -22,11 +22,14 @@ tauri-build = { version = "2", features = [] }
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.11.0"
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "=2.7.2"
 uuid = { version = "1.24.0", features = ["v4"] }
 
 [dev-dependencies]
 # 仅用于断言公开 serde DTO 的精确字段白名单，不进入应用运行时依赖。
 serde_json = "1.0.151"
+# 只在契约生成与漂移测试中派生 TypeScript，不进入普通应用产物。
+ts-rs = { version = "=12.0.1", default-features = false, features = ["serde-compat"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

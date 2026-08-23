@@ -208,6 +208,30 @@ impl ExecutionEventReceiver {
     fn pending_len(&self) -> usize {
         lock_unpoisoned(&self.queue.state).events.len()
     }
+
+    /// 在测试期限内等待生产端关闭；等待期间不消费事件，构造确定的慢消费者压力。
+    #[cfg(test)]
+    fn wait_until_closed(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut state = lock_unpoisoned(&self.queue.state);
+        while !state.closed {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let wait = deadline.saturating_duration_since(now);
+            let (next_state, wait_result) = self
+                .queue
+                .available
+                .wait_timeout(state, wait)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next_state;
+            if wait_result.timed_out() && !state.closed {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// 有界事件队列及其条件变量。
@@ -718,7 +742,10 @@ mod tests {
         let started = manager
             .start(verified_test_script(script))
             .expect("应启动高频输出脚本");
-        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            started.events.wait_until_closed(Duration::from_secs(15)),
+            "零消费时外部进程与输出线程仍应在期限内结束"
+        );
         assert!(started.events.pending_len() <= super::SESSION_EVENT_CAPACITY);
         let events = collect_until_terminal(&started);
         assert!(started_at.elapsed() < Duration::from_secs(15));

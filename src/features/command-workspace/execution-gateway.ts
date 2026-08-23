@@ -1,155 +1,96 @@
 /**
- * 固定 Execution 的前端 Typed IPC Gateway。
+ * Command Block Execution 的前端 Typed IPC Gateway。
  *
- * 本模块是 Command Workspace 唯一知道 Tauri 命令名和 Channel 构造方式的边界。
- * 它只允许启动 Rust 内置验收任务并按 Execution ID 取消，不接受脚本、路径、PID 或可执行文件。
+ * 本模块是前端唯一知道五个 Rust Command 名称和 Tauri Channel 构造方式的边界。公开请求
+ * 直接使用 Rust 生成的 TypeScript Contract，不接受脚本、可执行文件、Runner options、
+ * 工作目录、环境、PID 或任意进程终止旁路。
  */
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
+import type {
+  ApiError as WireApiError,
+  CancelExecutionResponse,
+  CommandBlockDetails,
+  CommandBlockSummary,
+  ExecutionStreamEvent,
+  IpcActiveExecutionState,
+  IpcOutputFragment,
+  PreviewCommandRequest,
+  PreviewCommandResponse,
+  RunCommandResponse,
+  VerifyRunRequest,
+} from "../../generated/contracts";
 
-/** Rust IPC 当前发布的稳定错误码。 */
+export type {
+  CancelExecutionResponse,
+  CommandBlockDetails,
+  CommandBlockSummary,
+  ExecutionStreamEvent,
+  PreviewCommandRequest,
+  PreviewCommandResponse,
+  RunCommandResponse,
+  VerifyRunRequest,
+} from "../../generated/contracts";
+
+/** Rust IPC 当前明确发布并由前端固定处理的错误码。 */
+export const PUBLISHED_API_ERROR_CODES = [
+  "COMMAND_BLOCK_NOT_FOUND",
+  "REVISION_CONFLICT",
+  "VALIDATION_FAILED",
+  "INVALID_TEMPLATE",
+  "UNSUPPORTED_RUNNER",
+  "RUNNER_UNAVAILABLE",
+  "INTERNAL_CONTRACT",
+  "STALE_PREVIEW",
+  "ARTIFACT_PREPARATION_FAILED",
+  "PROCESS_START_FAILED",
+  "EXECUTION_START_FAILED",
+  "CANCEL_FAILED",
+] as const;
+
+/** 前端可稳定分支处理的公开错误码，另含本地 IPC 收敛码。 */
 export type ApiErrorCode =
-  | "VALIDATION_FAILED"
-  | "CANCEL_FAILED"
-  | "RUNNER_UNAVAILABLE"
-  | "ARTIFACT_PREPARATION_FAILED"
-  | "PROCESS_START_FAILED"
-  | "EXECUTION_START_FAILED"
+  | (typeof PUBLISHED_API_ERROR_CODES)[number]
   | "IPC_FAILED";
 
-/** Rust IPC 返回的稳定错误。 */
-export interface ApiError {
-  /** 供界面按稳定语义处理的错误码。 */
+/** 经前端白名单收敛后的安全错误，不直接信任拒绝对象中的 message。 */
+export type ApiError = Omit<WireApiError, "code" | "message"> & {
+  /** 已发布后端码或本地 IPC 收敛码。 */
   code: ApiErrorCode;
-  /** 不包含本机私有路径或底层错误细节的公开说明。 */
+  /** 由前端固定映射且不含拒绝对象内容的安全说明。 */
   message: string;
+};
+
+/** 兼容现有 Workspace 的固定任务启动响应，与通用 Run 响应结构相同。 */
+export type StartFixedExecutionResponse = RunCommandResponse;
+
+/** 兼容现有 Workspace 的 Active 状态别名。 */
+export type ActiveExecutionState = IpcActiveExecutionState;
+
+/** 兼容现有 Workspace 的 Output Fragment 别名。 */
+export type ExecutionOutputFragment = IpcOutputFragment;
+
+/** Command Workspace 后续通用流程使用的窄业务 Gateway。 */
+export interface CommandExecutionGateway {
+  /** 按 Rust 固定顺序读取公开 Command Block 摘要。 */
+  listCommandBlocks(): Promise<CommandBlockSummary[]>;
+  /** 按业务 ID 读取不含内部模板或启动配置的公开详情。 */
+  getCommandBlock(commandBlockId: string): Promise<CommandBlockDetails>;
+  /** 提交结构化参数并取得 Rust Core 生成的可信 Preview。 */
+  previewCommandBlock(
+    request: PreviewCommandRequest,
+  ): Promise<PreviewCommandResponse>;
+  /** 使用已确认 Hash 复验并运行，事件只经本次调用专属 Channel 返回。 */
+  runCommandBlock(
+    request: VerifyRunRequest,
+    onEvent: (event: ExecutionStreamEvent) => void,
+  ): Promise<RunCommandResponse>;
+  /** 按 Execution UUID 请求终止对应 Job。 */
+  cancelExecution(executionId: string): Promise<CancelExecutionResponse>;
 }
 
-/** 固定任务启动响应。 */
-export interface StartFixedExecutionResponse {
-  /** Rust Core 分配的 Execution UUID。 */
-  executionId: string;
-}
-
-/** Rust Core 暴露的 Active 状态。 */
-export type ActiveExecutionState = "running" | "cancelling";
-
-/** 取消请求响应。 */
-export interface CancelExecutionResponse {
-  /** 本次调用是否首次接受取消请求。 */
-  accepted: boolean;
-  /** Execution 不存在或已经终止时为 null。 */
-  state: ActiveExecutionState | null;
-}
-
-/** 输出片段来自哪个标准流。 */
-export type ExecutionOutputStream = "stdout" | "stderr";
-
-/** Rust Output Coordinator 生成的一个纯文本片段。 */
-export interface ExecutionOutputFragment {
-  /** Output Coordinator 分配的片段级顺序。 */
-  fragmentSequence: number;
-  /** 片段所属标准流。 */
-  stream: ExecutionOutputStream;
-  /** 已由 Rust 增量解码的不可信纯文本。 */
-  text: string;
-}
-
-/** Session 已登记且受管进程即将恢复。 */
-export interface ExecutionStartedEvent {
-  /** 事件类型判别字段。 */
-  event: "started";
-  /** Started 的结构化事实。 */
-  data: {
-    /** 当前 Execution UUID。 */
-    executionId: string;
-    /** IPC 转发器分配的事件级顺序。 */
-    sequence: number;
-  };
-}
-
-/** 一个有界实时 Output Batch。 */
-export interface ExecutionOutputEvent {
-  /** 事件类型判别字段。 */
-  event: "output";
-  /** Output Batch 的结构化事实。 */
-  data: {
-    /** 当前 Execution UUID。 */
-    executionId: string;
-    /** IPC 转发器分配的事件级顺序。 */
-    sequence: number;
-    /** 保持 Rust Coordinator 观察顺序的纯文本片段。 */
-    fragments: ExecutionOutputFragment[];
-    /** 当前 Batch 之前因有界队列压力被丢弃的字节数。 */
-    droppedBytesBefore: number;
-  };
-}
-
-/** 根进程自然结束且 Job 已清空。 */
-export interface ExecutionFinishedEvent {
-  /** 事件类型判别字段。 */
-  event: "finished";
-  /** Finished 的结构化事实。 */
-  data: {
-    /** 当前 Execution UUID。 */
-    executionId: string;
-    /** IPC 转发器分配的事件级顺序。 */
-    sequence: number;
-    /** Windows PowerShell 原始 Exit Code。 */
-    exitCode: number;
-    /** Rust Core 从 Resume 到终态的毫秒数。 */
-    durationMs: number;
-    /** 尚未随 Output Batch 报告的丢弃字节数。 */
-    droppedOutputBytes: number;
-  };
-}
-
-/** 取消已被接受且整个 Job 已确认结束。 */
-export interface ExecutionCancelledEvent {
-  /** 事件类型判别字段。 */
-  event: "cancelled";
-  /** Cancelled 的结构化事实。 */
-  data: {
-    /** 当前 Execution UUID。 */
-    executionId: string;
-    /** IPC 转发器分配的事件级顺序。 */
-    sequence: number;
-    /** Rust Core 从 Resume 到终态的毫秒数。 */
-    durationMs: number;
-    /** 尚未随 Output Batch 报告的丢弃字节数。 */
-    droppedOutputBytes: number;
-  };
-}
-
-/** Resume 后发生的 Rust Core 内部失败。 */
-export interface ExecutionFailedEvent {
-  /** 事件类型判别字段。 */
-  event: "failed";
-  /** Failed 的结构化事实。 */
-  data: {
-    /** 当前 Execution UUID。 */
-    executionId: string;
-    /** IPC 转发器分配的事件级顺序。 */
-    sequence: number;
-    /** Rust Core 提供的稳定公开失败说明。 */
-    message: string;
-    /** Rust Core 从 Resume 到终态的毫秒数。 */
-    durationMs: number;
-    /** 尚未随 Output Batch 报告的丢弃字节数。 */
-    droppedOutputBytes: number;
-  };
-}
-
-/** 专属 Tauri Channel 上可能出现的全部 Execution 事件。 */
-export type ExecutionStreamEvent =
-  | ExecutionStartedEvent
-  | ExecutionOutputEvent
-  | ExecutionFinishedEvent
-  | ExecutionCancelledEvent
-  | ExecutionFailedEvent;
-
-/** Command Workspace 使用的最小固定任务 Gateway。 */
+/** 现有 Workspace 在后续 UI-RUN 原子前继续接受注入的固定任务 Gateway 类型。 */
 export interface FixedExecutionGateway {
-  /** 启动内置固定任务，并在专属 Channel 到达事件时同步通知调用方。 */
+  /** 仅供现有测试替身保持固定任务调用契约。 */
   startFixedExecution(
     onEvent: (event: ExecutionStreamEvent) => void,
   ): Promise<StartFixedExecutionResponse>;
@@ -184,83 +125,144 @@ const tauriTransport: ExecutionTransport = {
 };
 
 /**
- * 创建固定任务 Gateway。
+ * 创建通用 Command Block Gateway。
  *
  * @param transport 生产环境默认使用官方 Tauri Transport；测试传入无副作用替身。
  * @returns Tauri 宿主中返回窄业务边界，纯浏览器环境返回 `null`。
  */
-export function createFixedExecutionGateway(
+export function createCommandExecutionGateway(
   transport: ExecutionTransport = tauriTransport,
-): FixedExecutionGateway | null {
+): CommandExecutionGateway | null {
   if (!transport.isAvailable()) {
     return null;
   }
   return {
-    /** 创建专属事件 Channel 后启动 Rust 内置任务。 */
-    async startFixedExecution(
-      onEvent: (event: ExecutionStreamEvent) => void,
-    ): Promise<StartFixedExecutionResponse> {
-      const onEventChannel = transport.createChannel(onEvent);
-      try {
-        return await transport.invoke<StartFixedExecutionResponse>(
-          "start_fixed_execution",
-          { onEvent: onEventChannel },
-        );
-      } catch (error: unknown) {
-        throw normalizeApiError(error);
-      }
+    /** 不携带任何调用参数读取公开摘要。 */
+    listCommandBlocks(): Promise<CommandBlockSummary[]> {
+      return invokeSafely(transport, "list_command_blocks", {});
     },
-    /** 把 UUID 作为唯一取消标识传给 Rust，不接受 PID。 */
-    async cancelExecution(
-      executionId: string,
-    ): Promise<CancelExecutionResponse> {
-      try {
-        return await transport.invoke<CancelExecutionResponse>(
-          "cancel_execution",
-          { executionId },
-        );
-      } catch (error: unknown) {
-        throw normalizeApiError(error);
-      }
+    /** 只把业务 ID 传给详情命令。 */
+    getCommandBlock(commandBlockId: string): Promise<CommandBlockDetails> {
+      return invokeSafely(transport, "get_command_block", {
+        commandBlockId,
+      });
+    },
+    /** 只把 Rust 生成契约允许的结构化 Request 传给 Preview。 */
+    previewCommandBlock(
+      request: PreviewCommandRequest,
+    ): Promise<PreviewCommandResponse> {
+      return invokeSafely(transport, "preview_command_block", { request });
+    },
+    /** 仅 Run 创建当前 Execution 专属 Channel，不使用全局事件。 */
+    runCommandBlock(
+      request: VerifyRunRequest,
+      onEvent: (event: ExecutionStreamEvent) => void,
+    ): Promise<RunCommandResponse> {
+      const onEventChannel = transport.createChannel(onEvent);
+      return invokeSafely(transport, "run_command_block", {
+        request,
+        onEvent: onEventChannel,
+      });
+    },
+    /** 只把 Execution UUID 传给取消命令，不接受 PID。 */
+    cancelExecution(executionId: string): Promise<CancelExecutionResponse> {
+      return invokeSafely(transport, "cancel_execution", { executionId });
     },
   };
 }
 
+/**
+ * 保留现有 Workspace 的旧 Factory 出口，但不再构造后端已移除的固定任务 Gateway。
+ *
+ * @returns 固定返回 `null`；测试需要旧 UI 状态时应直接注入 `FixedExecutionGateway` 替身。
+ */
+export function createFixedExecutionGateway(): null {
+  return null;
+}
+
+/** 调用一个固定 Command，并把任意拒绝值收敛成安全前端错误。 */
+async function invokeSafely<T>(
+  transport: ExecutionTransport,
+  command: string,
+  arguments_: Record<string, unknown>,
+): Promise<T> {
+  try {
+    return await transport.invoke<T>(command, arguments_);
+  } catch (error: unknown) {
+    throw normalizeApiError(error);
+  }
+}
+
 /** 把未知拒绝值收敛为不会泄露任意对象内容的稳定前端错误。 */
 export function normalizeApiError(error: unknown): ApiError {
-  const code = publishedApiErrorCode(error);
-  if (code) {
-    return { code, message: PUBLIC_ERROR_MESSAGES[code] };
+  if (typeof error !== "object" || error === null) {
+    return ipcFallbackError();
   }
+  const candidate = error as Record<string, unknown>;
+  if (!isPublishedApiErrorCode(candidate.code)) {
+    return ipcFallbackError();
+  }
+  if (!isOptionalString(candidate, "parameterKey")) {
+    return ipcFallbackError();
+  }
+  if (!isOptionalString(candidate, "detailCode")) {
+    return ipcFallbackError();
+  }
+
+  const normalized: ApiError = {
+    code: candidate.code,
+    message: PUBLIC_ERROR_MESSAGES[candidate.code],
+  };
+  if (typeof candidate.parameterKey === "string") {
+    normalized.parameterKey = candidate.parameterKey;
+  }
+  if (typeof candidate.detailCode === "string") {
+    normalized.detailCode = candidate.detailCode;
+  }
+  return normalized;
+}
+
+/** 返回不包含原始拒绝值的统一 IPC 失败。 */
+function ipcFallbackError(): ApiError {
   return {
     code: "IPC_FAILED",
     message: "CmdBox 无法完成桌面宿主调用",
   };
 }
 
-/** Rust 已发布错误码到固定安全文案的唯一映射。 */
-const PUBLIC_ERROR_MESSAGES = {
-  VALIDATION_FAILED: "Execution ID 无效",
-  CANCEL_FAILED: "无法终止当前 Execution",
-  RUNNER_UNAVAILABLE: "系统 Windows PowerShell 不可用",
-  ARTIFACT_PREPARATION_FAILED: "无法准备固定任务临时脚本",
-  PROCESS_START_FAILED: "无法启动固定 PowerShell 任务",
-  EXECUTION_START_FAILED: "无法建立 Execution 后台任务",
-} as const satisfies Record<Exclude<ApiErrorCode, "IPC_FAILED">, string>;
-
-/** 只从未知拒绝值中接受 Rust 当前明确发布的错误码。 */
-function publishedApiErrorCode(
-  error: unknown,
-): Exclude<ApiErrorCode, "IPC_FAILED"> | null {
-  if (typeof error !== "object" || error === null) {
-    return null;
-  }
-  const candidate = error as Record<string, unknown>;
-  if (
-    typeof candidate.code === "string" &&
-    Object.prototype.hasOwnProperty.call(PUBLIC_ERROR_MESSAGES, candidate.code)
-  ) {
-    return candidate.code as Exclude<ApiErrorCode, "IPC_FAILED">;
-  }
-  return null;
+/** 判断一个候选值是否为 Rust 当前发布的错误码。 */
+function isPublishedApiErrorCode(
+  code: unknown,
+): code is (typeof PUBLISHED_API_ERROR_CODES)[number] {
+  return (
+    typeof code === "string" &&
+    Object.prototype.hasOwnProperty.call(PUBLIC_ERROR_MESSAGES, code)
+  );
 }
+
+/** 检查可选错误定位字段不存在或严格为字符串。 */
+function isOptionalString(
+  candidate: Record<string, unknown>,
+  key: "parameterKey" | "detailCode",
+): boolean {
+  return !(key in candidate) || typeof candidate[key] === "string";
+}
+
+/** Rust 已发布错误码到固定安全文案的唯一前端映射。 */
+const PUBLIC_ERROR_MESSAGES = {
+  COMMAND_BLOCK_NOT_FOUND: "未找到指定的 Command Block",
+  REVISION_CONFLICT: "Command Block 已更新，请重新载入",
+  VALIDATION_FAILED: "请求参数未通过校验",
+  INVALID_TEMPLATE: "Command Block 模板无效",
+  UNSUPPORTED_RUNNER: "当前 Runner 尚不支持",
+  RUNNER_UNAVAILABLE: "系统 Runner 不可用",
+  INTERNAL_CONTRACT: "Command Block 内部契约无效",
+  STALE_PREVIEW: "Preview 已失效，请重新生成",
+  ARTIFACT_PREPARATION_FAILED: "无法准备 Execution 临时脚本",
+  PROCESS_START_FAILED: "无法启动 Execution 进程",
+  EXECUTION_START_FAILED: "无法建立 Execution 后台任务",
+  CANCEL_FAILED: "无法终止当前 Execution",
+} as const satisfies Record<
+  (typeof PUBLISHED_API_ERROR_CODES)[number],
+  string
+>;

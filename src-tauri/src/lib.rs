@@ -13,10 +13,15 @@ pub mod execution;
 /// Tauri 命令、序列化契约与 Rust Core 之间的窄适配层。
 pub mod ipc;
 
+/// Rust serde 公开 DTO 到 TypeScript 的测试期生成与漂移检查。
+#[cfg(test)]
+mod typescript_contract;
+
 /// 创建并运行 CmdBox Tauri 应用。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(execution::planner::ExecutionPlanner::new())
         .manage(execution::manager::ExecutionManager::new())
         .invoke_handler(tauri::generate_handler![
@@ -28,4 +33,42 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("CmdBox Tauri 应用启动失败");
+}
+
+#[cfg(test)]
+mod capability_tests {
+    //! 桌面目录选择插件的最小 Capability 回归测试。
+
+    use serde_json::Value;
+
+    /// 验证 Dialog 只开放 Open，且没有引入 default、Save、Message 或文件系统旁路。
+    #[test]
+    fn dialog_capability_only_allows_open() {
+        let capability: Value = serde_json::from_str(include_str!("../capabilities/default.json"))
+            .expect("默认 Capability 应为有效 JSON");
+        let permissions = capability["permissions"]
+            .as_array()
+            .expect("默认 Capability 应声明 permissions")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+
+        assert!(permissions.contains(&"dialog:allow-open"));
+        assert_eq!(
+            permissions
+                .iter()
+                .filter(|permission| permission.starts_with("dialog:"))
+                .copied()
+                .collect::<Vec<_>>(),
+            vec!["dialog:allow-open"]
+        );
+        for forbidden_prefix in ["fs:", "shell:", "opener:"] {
+            assert!(
+                permissions
+                    .iter()
+                    .all(|permission| !permission.starts_with(forbidden_prefix)),
+                "不得开放 {forbidden_prefix} 权限"
+            );
+        }
+    }
 }

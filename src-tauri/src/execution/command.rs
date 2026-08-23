@@ -28,6 +28,8 @@ const CMD_PARAMETER_ECHO_TEMPLATE: &str = "echo({{text}}\r\necho({{count}}\r\n{{
 
 /// Command Block 的来源身份。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub enum CommandOrigin {
     /// 由 CmdBox 固定提供并测试的 Built-in Definition。
@@ -38,6 +40,8 @@ pub enum CommandOrigin {
 
 /// 当前 Windows MVP 可由 Command Block 声明的 Runner。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub enum RunnerType {
     /// 系统 Windows PowerShell Runner。
@@ -48,6 +52,8 @@ pub enum RunnerType {
 
 /// Command Block 的稳定风险语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub enum RiskLevel {
     /// 不产生不可逆文件副作用的普通命令。

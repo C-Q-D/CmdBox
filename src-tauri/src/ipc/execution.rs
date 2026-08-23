@@ -22,6 +22,8 @@ use crate::execution::session::{ExecutionEvent, ExecutionEventReceiver, Executio
 
 /// IPC 调用失败时返回的稳定错误对象。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct ApiError {
     /// 供前端稳定分支处理的错误码。
@@ -30,9 +32,11 @@ pub struct ApiError {
     pub message: String,
     /// 参数校验错误直接关联的 Parameter key；其他错误省略。
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub parameter_key: Option<String>,
     /// 参数或内部模板错误的稳定原因码；其他错误省略。
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub detail_code: Option<String>,
 }
 
@@ -50,6 +54,8 @@ impl ApiError {
 
 /// Command Block 启动成功后的最小响应。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct RunCommandResponse {
     /// 新建 Execution 的 UUID 字符串。
@@ -58,6 +64,8 @@ pub struct RunCommandResponse {
 
 /// 取消调用返回的非终态事实。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct CancelExecutionResponse {
     /// 本次调用是否首次接受取消请求。
@@ -68,6 +76,8 @@ pub struct CancelExecutionResponse {
 
 /// 可通过 IPC 观察的 Active Execution 状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub enum IpcActiveExecutionState {
     /// Execution 正在运行。
@@ -78,6 +88,8 @@ pub enum IpcActiveExecutionState {
 
 /// 输出文本来自哪个标准流。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub enum IpcOutputStream {
     /// 标准输出。
@@ -88,9 +100,12 @@ pub enum IpcOutputStream {
 
 /// 一个按 Output Coordinator 观察顺序生成的纯文本片段。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub struct IpcOutputFragment {
     /// Output Coordinator 分配的片段级顺序，不与事件级顺序混用。
+    #[cfg_attr(test, ts(type = "number"))]
     pub fragment_sequence: u64,
     /// 片段所属标准流。
     pub stream: IpcOutputStream,
@@ -100,6 +115,8 @@ pub struct IpcOutputFragment {
 
 /// 专属 Tauri Channel 上的完整事件流。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -112,6 +129,7 @@ pub enum ExecutionStreamEvent {
         /// 当前 Execution UUID。
         execution_id: String,
         /// IPC 转发器分配的事件级顺序。
+        #[cfg_attr(test, ts(type = "number"))]
         sequence: u64,
     },
     /// 一个有界 Output Batch。
@@ -119,10 +137,12 @@ pub enum ExecutionStreamEvent {
         /// 当前 Execution UUID。
         execution_id: String,
         /// IPC 转发器分配的事件级顺序。
+        #[cfg_attr(test, ts(type = "number"))]
         sequence: u64,
         /// 保持协调器观察顺序的纯文本片段。
         fragments: Vec<IpcOutputFragment>,
         /// 当前 Batch 之前因有界队列压力被丢弃的字节数。
+        #[cfg_attr(test, ts(type = "number"))]
         dropped_bytes_before: u64,
     },
     /// 根进程自然结束且 Job 已清空。
@@ -130,12 +150,15 @@ pub enum ExecutionStreamEvent {
         /// 当前 Execution UUID。
         execution_id: String,
         /// IPC 转发器分配的事件级顺序。
+        #[cfg_attr(test, ts(type = "number"))]
         sequence: u64,
-        /// Windows PowerShell 原始 Exit Code。
+        /// Runner 根进程的原始 Exit Code。
         exit_code: u32,
         /// Rust Core 从 Resume 到终态的毫秒数。
+        #[cfg_attr(test, ts(type = "number"))]
         duration_ms: u64,
         /// 尚未随 Output Batch 报告的丢弃字节数。
+        #[cfg_attr(test, ts(type = "number"))]
         dropped_output_bytes: u64,
     },
     /// 取消已被接受并且整个 Job 已确认结束。
@@ -143,10 +166,13 @@ pub enum ExecutionStreamEvent {
         /// 当前 Execution UUID。
         execution_id: String,
         /// IPC 转发器分配的事件级顺序。
+        #[cfg_attr(test, ts(type = "number"))]
         sequence: u64,
         /// Rust Core 从 Resume 到终态的毫秒数。
+        #[cfg_attr(test, ts(type = "number"))]
         duration_ms: u64,
         /// 尚未随 Output Batch 报告的丢弃字节数。
+        #[cfg_attr(test, ts(type = "number"))]
         dropped_output_bytes: u64,
     },
     /// Resume 后发生后端内部失败。
@@ -154,12 +180,15 @@ pub enum ExecutionStreamEvent {
         /// 当前 Execution UUID。
         execution_id: String,
         /// IPC 转发器分配的事件级顺序。
+        #[cfg_attr(test, ts(type = "number"))]
         sequence: u64,
         /// Rust Core 返回的稳定失败说明。
         message: String,
         /// Rust Core 从 Resume 到终态的毫秒数。
+        #[cfg_attr(test, ts(type = "number"))]
         duration_ms: u64,
         /// 尚未随 Output Batch 报告的丢弃字节数。
+        #[cfg_attr(test, ts(type = "number"))]
         dropped_output_bytes: u64,
     },
 }
