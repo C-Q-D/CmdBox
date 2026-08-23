@@ -23,6 +23,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let runner = WindowsPowerShellRunner::resolve()?;
     let rendered = RenderedScript::windows_powershell(script);
     let artifact = MaterializedScript::create(rendered)?;
+    let artifact_directory_name = artifact
+        .script_path()
+        .parent()
+        .and_then(|directory| directory.file_name())
+        .ok_or("受管 Artifact 缺少唯一目录名")?
+        .to_string_lossy()
+        .into_owned();
+    fs::write(
+        control_directory.join("artifact-directory.name"),
+        artifact_directory_name,
+    )?;
     let launch = runner.process_launch(artifact, &std::env::temp_dir());
     let mut prepared = ManagedProcess::prepare(launch)?;
     let output = prepared.take_output().ok_or("受管进程缺少输出读端")?;

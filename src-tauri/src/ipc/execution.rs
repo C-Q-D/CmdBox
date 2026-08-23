@@ -409,7 +409,7 @@ mod tests {
         ExecutionStreamEvent, IpcOutputStream, RunCommandResponse,
     };
     use crate::execution::artifact::{ArtifactError, ArtifactOperation};
-    use crate::execution::command::POWERSHELL_PARAMETER_ECHO_ID;
+    use crate::execution::command::{CMD_PARAMETER_ECHO_ID, POWERSHELL_PARAMETER_ECHO_ID};
     use crate::execution::manager::ExecutionManager;
     use crate::execution::output::{OutputBatch, OutputFragment, OutputStream};
     use crate::execution::parameter::ParameterValue;
@@ -421,16 +421,18 @@ mod tests {
 
     /// 返回固定 PowerShell Built-in 可接受的完整六类参数。
     fn valid_values(enabled: bool) -> BTreeMap<String, ParameterValue> {
+        valid_values_with_text(enabled, "中文 空格 user's value")
+    }
+
+    /// 返回指定 Text 与固定其余五类值，供两个 Runner 的同接口回归复用。
+    fn valid_values_with_text(enabled: bool, text: &str) -> BTreeMap<String, ParameterValue> {
         let temporary = std::env::temp_dir().to_string_lossy().into_owned();
         let current = std::env::current_dir()
             .expect("测试当前目录应存在")
             .to_string_lossy()
             .into_owned();
         BTreeMap::from([
-            (
-                "text".to_owned(),
-                ParameterValue::Text("中文 空格 user's value".to_owned()),
-            ),
+            ("text".to_owned(), ParameterValue::Text(text.to_owned())),
             ("count".to_owned(), ParameterValue::Number(4.0)),
             ("enabled".to_owned(), ParameterValue::Boolean(enabled)),
             (
@@ -456,16 +458,34 @@ mod tests {
         crate::execution::planner::PreviewCommandResponse,
         VerifyRunRequest,
     ) {
-        let values = valid_values(enabled);
+        preview_and_run_request_for(
+            planner,
+            POWERSHELL_PARAMETER_ECHO_ID,
+            enabled,
+            "中文 空格 user's value",
+        )
+    }
+
+    /// 生成指定参数回显 Built-in 的 Preview 与后续同 Hash Run 请求。
+    fn preview_and_run_request_for(
+        planner: &ExecutionPlanner,
+        command_block_id: &str,
+        enabled: bool,
+        text: &str,
+    ) -> (
+        crate::execution::planner::PreviewCommandResponse,
+        VerifyRunRequest,
+    ) {
+        let values = valid_values_with_text(enabled, text);
         let preview = planner
             .preview(&PreviewCommandRequest {
-                command_block_id: POWERSHELL_PARAMETER_ECHO_ID.to_owned(),
+                command_block_id: command_block_id.to_owned(),
                 expected_revision: 1,
                 parameter_values: values.clone(),
             })
-            .expect("PowerShell Built-in Preview 应成功");
+            .expect("参数回显 Built-in Preview 应成功");
         let request = VerifyRunRequest {
-            command_block_id: POWERSHELL_PARAMETER_ECHO_ID.to_owned(),
+            command_block_id: command_block_id.to_owned(),
             expected_revision: preview.revision,
             parameter_values: values,
             execution_spec_hash: preview.execution_spec_hash.clone(),
@@ -954,5 +974,119 @@ mod tests {
 
         assert_eq!(temporary_before, direct_directory_entries(&temporary_root));
         assert_eq!(current_before, direct_directory_entries(&current_root));
+    }
+
+    /// 验证 CMD Built-in 经相同 Preview、复验、Session 和 IPC 接口安全回显全部边界字符。
+    #[test]
+    fn runs_typed_cmd_built_in_through_ipc_adapter() {
+        let target_root = std::env::temp_dir()
+            .join("CmdBox")
+            .join(format!("test-target-{}", uuid::Uuid::new_v4()));
+        let first_target = target_root.join("first target");
+        let second_target = target_root.join("second 日本語 target");
+        fs::create_dir_all(&first_target).expect("应创建第一测试目标目录");
+        fs::create_dir(&second_target).expect("应创建第二测试目标目录");
+        let planner = ExecutionPlanner::new();
+        let text = "中文 日本語 😀 space ' \" & echo(EXTRA % ^ ! ( ) < > | \\\\ tail";
+
+        for enabled in [true, false] {
+            let mut values = valid_values_with_text(enabled, text);
+            values.insert(
+                "folder".to_owned(),
+                ParameterValue::Text(first_target.to_string_lossy().into_owned()),
+            );
+            values.insert(
+                "folders".to_owned(),
+                ParameterValue::Array(vec![
+                    ParameterValue::Text(first_target.to_string_lossy().into_owned()),
+                    ParameterValue::Text(second_target.to_string_lossy().into_owned()),
+                ]),
+            );
+            let preview = planner
+                .preview(&PreviewCommandRequest {
+                    command_block_id: CMD_PARAMETER_ECHO_ID.to_owned(),
+                    expected_revision: 1,
+                    parameter_values: values.clone(),
+                })
+                .expect("CMD Preview 应成功");
+            let run_request = VerifyRunRequest {
+                command_block_id: CMD_PARAMETER_ECHO_ID.to_owned(),
+                expected_revision: preview.revision,
+                parameter_values: values,
+                execution_spec_hash: preview.execution_spec_hash.clone(),
+            };
+            assert!(!preview.preview_text.contains(text));
+            let manager = ExecutionManager::new();
+            let channel_events = Arc::new(Mutex::new(Vec::<ExecutionStreamEvent>::new()));
+            let observed = Arc::clone(&channel_events);
+            run_with_sender(&planner, manager.clone(), &run_request, move |event| {
+                observed.lock().expect("事件锁不应中毒").push(event);
+                Ok(())
+            })
+            .expect("当前 Preview 应启动 CMD Built-in");
+
+            let events = wait_for_terminal(&channel_events);
+            assert!(matches!(
+                events.first(),
+                Some(ExecutionStreamEvent::Started { .. })
+            ));
+            assert!(matches!(
+                events.last(),
+                Some(ExecutionStreamEvent::Finished { exit_code: 0, .. })
+            ));
+            assert_eq!(
+                events.iter().filter(|event| is_ipc_terminal(event)).count(),
+                1
+            );
+            let collect_stream = |stream| {
+                events
+                    .iter()
+                    .filter_map(|event| match event {
+                        ExecutionStreamEvent::Output { fragments, .. } => Some(fragments),
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter(|fragment| fragment.stream == stream)
+                    .map(|fragment| fragment.text.as_str())
+                    .collect::<String>()
+            };
+            let stdout = collect_stream(IpcOutputStream::Stdout);
+            let stderr = collect_stream(IpcOutputStream::Stderr);
+            let summary_values = |key: &str| {
+                preview
+                    .parameter_summaries
+                    .iter()
+                    .find(|summary| summary.parameter_key == key)
+                    .expect("Preview 应含完整参数摘要")
+                    .display_values
+                    .clone()
+            };
+            let mut expected_lines = vec![text.to_owned(), "4".to_owned()];
+            if enabled {
+                expected_lines.push("enabled".to_owned());
+            }
+            expected_lines.push("detailed".to_owned());
+            expected_lines.extend(summary_values("folder"));
+            expected_lines.extend(summary_values("folders"));
+
+            assert_eq!(
+                stdout.lines().map(ToOwned::to_owned).collect::<Vec<_>>(),
+                expected_lines,
+                "注入样式文本不得产生额外 stdout：{stdout:?}"
+            );
+            assert!(stderr.is_empty(), "注入样式文本不得产生 stderr：{stderr:?}");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline && !manager.active_snapshot().is_empty() {
+                std::thread::yield_now();
+            }
+            assert!(manager.active_snapshot().is_empty(), "CMD 不得遗留受管进程");
+        }
+
+        assert!(direct_directory_entries(&first_target).is_empty());
+        assert!(direct_directory_entries(&second_target).is_empty());
+        fs::remove_dir(&first_target).expect("第一测试目标应保持为空并可清理");
+        fs::remove_dir(&second_target).expect("第二测试目标应保持为空并可清理");
+        fs::remove_dir(&target_root).expect("测试目标根应保持为空并可清理");
+        assert!(!target_root.exists(), "测试结束不得遗留目标目录");
     }
 }

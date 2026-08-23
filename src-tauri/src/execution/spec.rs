@@ -16,7 +16,7 @@ use super::parameter::{NormalizedParameterValue, NormalizedParameters};
 /// Canonical Execution Spec 的稳定格式身份，避免其他二进制载荷与本格式混淆。
 const EXECUTION_SPEC_FORMAT: &[u8] = b"cmdbox.execution-spec";
 
-/// 一次 PowerShell Preview/Run 都必须绑定的完整规范化执行事实。
+/// 一次 Preview/Run 都必须绑定的完整规范化执行事实。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CanonicalExecutionSpec {
     /// Canonical 编码格式版本；字段或编码规则变化时必须递增。
@@ -31,6 +31,8 @@ pub(crate) struct CanonicalExecutionSpec {
     pub(crate) runner_executable: PathBuf,
     /// 动态脚本路径之前的固定 Runner 选项，顺序属于执行语义。
     pub(crate) runner_fixed_options: Vec<OsString>,
+    /// CMD `/C` 后的固定 raw command tail；PowerShell 为 `None`。
+    pub(crate) runner_raw_command_tail: Option<OsString>,
     /// 对包含编码前导的完整最终 Artifact 字节计算的 SHA-256。
     pub(crate) artifact_hash: [u8; 32],
     /// 严格按 Parameter Definition 顺序保存的规范化参数。
@@ -39,6 +41,8 @@ pub(crate) struct CanonicalExecutionSpec {
     pub(crate) working_directory: PathBuf,
     /// Command Block 显式声明的非敏感环境变量，按 key 排序。
     pub(crate) explicit_environment: BTreeMap<String, String>,
+    /// Runner 固定环境与非空参数私有绑定，值按原始 UTF-16 编码。
+    pub(crate) internal_environment: BTreeMap<String, OsString>,
     /// 当前 Safety Policy 语义版本。
     pub(crate) safety_policy_version: u32,
     /// 当前 Outcome Policy 语义版本。
@@ -72,6 +76,10 @@ impl CanonicalExecutionSpec {
             "runnerFixedOptions",
             &encode_os_string_sequence(&self.runner_fixed_options),
         );
+        record.field(
+            "runnerRawCommandTail",
+            &encode_optional_os_string(self.runner_raw_command_tail.as_ref()),
+        );
         record.field("artifactHash", &self.artifact_hash);
         record.field(
             "normalizedParameters",
@@ -84,6 +92,10 @@ impl CanonicalExecutionSpec {
         record.field(
             "explicitEnvironment",
             &encode_environment(&self.explicit_environment),
+        );
+        record.field(
+            "internalEnvironment",
+            &encode_os_environment(&self.internal_environment),
         );
         record.field(
             "safetyPolicyVersion",
@@ -144,6 +156,19 @@ fn encode_os_string_sequence(values: &[OsString]) -> Vec<u8> {
     bytes.extend_from_slice(&(values.len() as u64).to_le_bytes());
     for value in values {
         push_length_prefixed(&mut bytes, &encode_windows_os_string(value));
+    }
+    bytes
+}
+
+/// 编码可选 Windows 字符串并保留 `None` 与空字符串的区别。
+fn encode_optional_os_string(value: Option<&OsString>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    match value {
+        Some(value) => {
+            bytes.push(1);
+            push_length_prefixed(&mut bytes, &encode_windows_os_string(value));
+        }
+        None => bytes.push(0),
     }
     bytes
 }
@@ -225,6 +250,19 @@ fn encode_environment(environment: &BTreeMap<String, String>) -> Vec<u8> {
     bytes
 }
 
+/// 按稳定 key 顺序编码内部环境，保留 Windows 值的原始 UTF-16 单元。
+fn encode_os_environment(environment: &BTreeMap<String, OsString>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(environment.len() as u64).to_le_bytes());
+    for (key, value) in environment {
+        let mut encoded_entry = CanonicalWriter::new();
+        encoded_entry.field("key", key.as_bytes());
+        encoded_entry.field("value", &encode_windows_os_string(value));
+        push_length_prefixed(&mut bytes, &encoded_entry.finish());
+    }
+    bytes
+}
+
 /// 将 32 字节 SHA-256 编码为固定 64 字符小写十六进制文本。
 fn encode_hash_hex(hash: &[u8; 32]) -> String {
     const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -252,7 +290,7 @@ mod tests {
     /// 创建所有当前 Hash 组件都有可辨识值的 Canonical Spec。
     fn fixture() -> CanonicalExecutionSpec {
         CanonicalExecutionSpec {
-            schema_version: 1,
+            schema_version: 2,
             command_block_id: "builtin.test".to_owned(),
             revision: 3,
             runner_type: "windowsPowerShell".to_owned(),
@@ -260,6 +298,7 @@ mod tests {
                 r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
             ),
             runner_fixed_options: vec![OsString::from("-NoLogo"), OsString::from("-File")],
+            runner_raw_command_tail: None,
             artifact_hash: [7; 32],
             normalized_parameters: NormalizedParameters {
                 entries: vec![NormalizedParameter {
@@ -272,6 +311,10 @@ mod tests {
                 ("CMDBOX_FIRST".to_owned(), "一".to_owned()),
                 ("CMDBOX_SECOND".to_owned(), "two".to_owned()),
             ]),
+            internal_environment: BTreeMap::from([(
+                "CMDBOX_INTERNAL_CHCP".to_owned(),
+                OsString::from(r"C:\Windows\System32\chcp.com"),
+            )]),
             safety_policy_version: 4,
             outcome_policy_version: 5,
         }
@@ -305,6 +348,9 @@ mod tests {
             .push(OsString::from("-Changed"));
         variants.push(changed);
         let mut changed = baseline.clone();
+        changed.runner_raw_command_tail = Some(OsString::from(r#"""!ARTIFACT!"""#));
+        variants.push(changed);
+        let mut changed = baseline.clone();
         changed.artifact_hash[0] ^= 1;
         variants.push(changed);
         let mut changed = baseline.clone();
@@ -318,6 +364,12 @@ mod tests {
         changed
             .explicit_environment
             .insert("CMDBOX_THIRD".to_owned(), "3".to_owned());
+        variants.push(changed);
+        let mut changed = baseline.clone();
+        changed.internal_environment.insert(
+            "CMDBOX_INTERNAL_VALUE_00000000".to_owned(),
+            OsString::from("literal"),
+        );
         variants.push(changed);
         let mut changed = baseline.clone();
         changed.safety_policy_version += 1;
@@ -346,6 +398,28 @@ mod tests {
 
         assert_eq!(first.hash(), second.hash());
         assert_eq!(first.hash_hex().len(), 64);
+
+        let mut third = fixture();
+        third.internal_environment = BTreeMap::new();
+        third.internal_environment.insert(
+            "CMDBOX_INTERNAL_VALUE_00000000".to_owned(),
+            OsString::from("literal"),
+        );
+        third.internal_environment.insert(
+            "CMDBOX_INTERNAL_CHCP".to_owned(),
+            OsString::from(r"C:\Windows\System32\chcp.com"),
+        );
+        let mut fourth = third.clone();
+        fourth.internal_environment = BTreeMap::new();
+        fourth.internal_environment.insert(
+            "CMDBOX_INTERNAL_CHCP".to_owned(),
+            OsString::from(r"C:\Windows\System32\chcp.com"),
+        );
+        fourth.internal_environment.insert(
+            "CMDBOX_INTERNAL_VALUE_00000000".to_owned(),
+            OsString::from("literal"),
+        );
+        assert_eq!(third.hash(), fourth.hash());
     }
 
     /// 验证 length prefix 能区分内容拼接后相同但字段边界不同的参数序列。

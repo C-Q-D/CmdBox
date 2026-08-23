@@ -154,7 +154,7 @@ CMD02-TEMPLATE-01┘                                      │
 
 ## CMD02-CMD-01 增加确定性 CMD 执行适配
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：CMD 内置 Block 对中文、空格、单引号和 Shell 元字符做字面参数回显，条件/循环正确且不执行注入内容。
 - 唯一目标：让既有 Planner/VerifiedExecution/Session 支持确定性 CMD Script Artifact。
 - 当前行为与目标行为：已有 PowerShell 纵向路径；完成后第二个内置 CMD Block 通过同一业务 Interface 工作。
@@ -162,7 +162,7 @@ CMD02-TEMPLATE-01┘                                      │
 - 代码定位依据：Runner、Artifact、Serializer、Planner、ManagedProcess 环境块和 Windows 集成测试。
 - 允许修改：CMD Adapter 所需后端文件、Win32 feature 和测试 helper/集成测试。
 - 明确不修改：React、任意 CMD 编辑、文件副作用、自动编码猜测和其他 Runner。
-- 实现步骤：System32 解析 `cmd.exe`；最终 `.cmd` 使用 UTF-8 无 BOM、CRLF、ASCII `chcp 65001` 与 `setlocal` 前导；固定 `/D /Q /A /E:ON /V:ON /C`；Artifact 路径和参数通过 Rust 构建的私有 UTF-16 Environment block 与 delayed expansion 进入脚本；外部 argv 值使用标准 Windows quoting；模板上下文拒绝二次解析结构。
+- 实现步骤：System32 解析 `cmd.exe`；最终 `.cmd` 使用 UTF-8 无 BOM、CRLF、ASCII `chcp 65001` 与 `setlocal` 前导；固定 `/D /Q /A /E:ON /V:ON /S /C`；Artifact 路径和参数通过 Rust 构建的私有 UTF-16 Environment block 与 delayed expansion 进入脚本；CMD `/C` 使用固定 raw command tail，其他 Runner 参数继续使用标准 Windows quoting；模板上下文拒绝二次解析结构。
 - 接口、数据与错误契约：私有环境变量名和值、Runner flags 和最终 Artifact 字节进入 Canonical Spec；配置环境不能覆盖内部保留名；Process 使用 `CREATE_UNICODE_ENVIRONMENT`。
 - 边界与异常：拒绝 NUL/CR/LF、单变量或展开物理命令行达到 8191 字符、`CALL`、嵌套 `cmd /C|K` 和 `for /f ('...')` 插值上下文；不承诺自定义 argv parser 或不遵守 CP65001 的外部程序。
 - 测试要求：中文、日文、Emoji、空格、单双引号、`& % ^ ! ( ) < > |`、反斜杠、空值、if/each、stdout/stderr、含特殊字符 Artifact 路径；注入标记不得成为额外输出或文件；当前 Windows 真实集成只运行回显/短等待。
@@ -174,6 +174,12 @@ CMD02-TEMPLATE-01┘                                      │
 - 风险等级：L3
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(core): [CMD02-CMD-01] 增加确定性 CMD 执行适配`
+
+### 执行记录
+
+- 实际交付：新增确定解析 `cmd.exe`、`chcp.com` 和 `SystemRoot` 的 `CmdRunner`，以 UTF-8 无 BOM `.cmd`、固定 raw `/S /C` tail 和完全替换的 UTF-16 Environment block 执行第二个类型化回显 Built-in。非空参数只进入确定命名的私有环境，空值静态渲染；严格 AST/物理行 allowlist 只接受单次解析的 `echo(` 行，拒绝控制字符、二次解析结构和达到 8191 UTF-16 单元的值或物理行。Canonical Spec Schema 2 已覆盖 Runner、raw tail、最终 Artifact Hash、显式/固定/私有环境和全部既有执行事实；随机 Artifact 路径仅作为 launch-only 值。
+- 实际验证：CMD 窄测 13 项、完整 Rust 单元测试 78 项和 Windows Job Object 集成测试 1 项通过；普通应用构建、`cargo fmt --check`、strict Clippy、`git diff --check` 与危险命令审计通过。真实 CMD 仅执行回显和受控非零退出，已覆盖中文、日文、Emoji、单双引号、反斜杠、空值、`& % ^ ! ( ) < > |` 及含特殊字符 Artifact 路径；输出、Exit Code、Active Execution、目标目录和 Artifact 清理均精确断言。L3 隔离复核结论为 `PASS`。
+- 计划偏差：完全替换环境的真实红测证明 CMD 分派 Batch 仍需要 `SystemRoot`，因此从 System32 确定推导该值并纳入固定环境和 Canonical Hash；`/S` 同时纳入固定 Runner options，确保双层引号 raw tail 的处理语义被冻结。既有强退 helper 无法运行 RAII 清理的问题也在本原子内补齐了 UUID 子目录回报、范围验证和测试侧精确清理。
 
 ## CMD02-UI-CONTRACT-01 接入前端契约与目录选择
 

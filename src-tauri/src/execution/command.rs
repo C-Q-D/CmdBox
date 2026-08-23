@@ -4,6 +4,8 @@
 //! 类型化参数和受限模板。Definition 不包含可执行文件、Runner options 或已经渲染的脚本，
 //! 也不会在构造时创建文件或进程。
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::parameter::{
@@ -22,7 +24,7 @@ pub const CMD_PARAMETER_ECHO_ID: &str = "builtin.parameter-echo.cmd";
 const POWERSHELL_PARAMETER_ECHO_TEMPLATE: &str = "$ErrorActionPreference = 'Stop'\nWrite-Output {{text}}\nWrite-Output {{count}}\n{{#if enabled}}Write-Output 'enabled'\n{{/if}}Write-Output {{mode}}\nWrite-Output {{folder}}\n{{#each folders}}Write-Output {{this}}\n{{/each}}";
 
 /// CMD 参数回显使用的受限静态模板。
-const CMD_PARAMETER_ECHO_TEMPLATE: &str = "@echo off\r\necho {{text}}\r\necho {{count}}\r\n{{#if enabled}}echo enabled\r\n{{/if}}echo {{mode}}\r\necho {{folder}}\r\n{{#each folders}}echo {{this}}\r\n{{/each}}";
+const CMD_PARAMETER_ECHO_TEMPLATE: &str = "echo({{text}}\r\necho({{count}}\r\n{{#if enabled}}echo(enabled\r\n{{/if}}echo({{mode}}\r\necho({{folder}}\r\n{{#each folders}}echo({{this}}\r\n{{/each}}";
 
 /// Command Block 的来源身份。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +42,7 @@ pub enum CommandOrigin {
 pub enum RunnerType {
     /// 系统 Windows PowerShell Runner。
     WindowsPowerShell,
-    /// 系统 CMD Runner；是否开放由后续真实编码门禁决定。
+    /// 系统 CMD Runner，通过确定 Artifact、私有环境绑定与真实编码门禁执行。
     Cmd,
 }
 
@@ -76,6 +78,8 @@ pub(crate) struct CommandBlockDefinition {
     pub template: String,
     /// 按 Command Workspace 与规范化输出顺序排列的 Parameter Definition。
     pub parameters: Vec<ParameterDefinition>,
+    /// Runner 继承环境之外由 Definition 明确声明的非敏感环境变量。
+    pub environment: BTreeMap<String, String>,
 }
 
 /// 按稳定顺序返回 PowerShell 和 CMD 两个正常风险参数回显 Built-in。
@@ -91,6 +95,7 @@ pub(crate) fn builtin_command_definitions() -> [CommandBlockDefinition; 2] {
             revision: 1,
             template: POWERSHELL_PARAMETER_ECHO_TEMPLATE.to_owned(),
             parameters: echo_parameter_definitions(),
+            environment: BTreeMap::new(),
         },
         CommandBlockDefinition {
             id: CMD_PARAMETER_ECHO_ID.to_owned(),
@@ -102,6 +107,7 @@ pub(crate) fn builtin_command_definitions() -> [CommandBlockDefinition; 2] {
             revision: 1,
             template: CMD_PARAMETER_ECHO_TEMPLATE.to_owned(),
             parameters: echo_parameter_definitions(),
+            environment: BTreeMap::new(),
         },
     ]
 }

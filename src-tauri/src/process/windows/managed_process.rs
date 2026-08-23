@@ -32,13 +32,16 @@ use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::SystemServices::JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, ResumeThread, TerminateProcess, WaitForSingleObject,
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
-    STARTUPINFOW,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION,
+    STARTF_USESTDHANDLES, STARTUPINFOW,
 };
 use windows_sys::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus};
 
 use crate::execution::artifact::ArtifactError;
-use crate::process::windows::runner::ProcessLaunch;
+use crate::process::windows::runner::{ProcessLaunch, ProcessLaunchEnvironment};
+
+/// CreateProcessW 环境块允许的最大 UTF-16 单元数，包含最终双 NUL。
+const WINDOWS_ENVIRONMENT_MAX_UTF16_UNITS: usize = 32_767;
 
 /// CmdBox 主动取消 Job 时使用的进程退出码。
 pub(crate) const CMDBOX_CANCEL_EXIT_CODE: u32 = 0xC000_013A;
@@ -108,6 +111,8 @@ pub enum ManagedProcessError {
         /// 被拒绝的工作目录。
         path: PathBuf,
     },
+    /// 内部环境覆盖无法编码为合法的 Windows Unicode 环境块。
+    InvalidEnvironment,
 }
 
 /// 输出面向开发者的受管进程错误说明。
@@ -121,6 +126,7 @@ impl Display for ManagedProcessError {
             Self::InvalidWorkingDirectory { path } => {
                 write!(formatter, "受管进程工作目录不可用：{}", path.display())
             }
+            Self::InvalidEnvironment => formatter.write_str("受管进程环境块无效"),
         }
     }
 }
@@ -132,6 +138,7 @@ impl Error for ManagedProcessError {
             Self::Artifact(source) => Some(source),
             Self::Win32 { source, .. } => Some(source),
             Self::InvalidWorkingDirectory { .. } => None,
+            Self::InvalidEnvironment => None,
         }
     }
 }
@@ -524,9 +531,29 @@ impl ManagedProcess {
             .verify_before_spawn()
             .map_err(ManagedProcessError::Artifact)?;
         let job = Arc::new(KillOnCloseJob::create()?);
-        let mut command_line = build_command_line(launch.executable(), launch.arguments());
+        let mut command_line = build_command_line(
+            launch.executable(),
+            launch.arguments(),
+            launch.raw_command_tail(),
+        );
         let application_name = wide_null_terminated(launch.executable().as_os_str());
         let current_directory = wide_null_terminated(launch.working_directory().as_os_str());
+        let mut environment = match launch.environment() {
+            ProcessLaunchEnvironment::Inherit => None,
+            ProcessLaunchEnvironment::Replace(entries) => {
+                Some(build_unicode_environment_block(entries)?)
+            }
+        };
+        let creation_flags = CREATE_SUSPENDED
+            | CREATE_NO_WINDOW
+            | if environment.is_some() {
+                CREATE_UNICODE_ENVIRONMENT
+            } else {
+                0
+            };
+        let environment_pointer = environment
+            .as_mut()
+            .map_or(null(), |block| block.as_mut_ptr().cast());
         let mut startup_info: STARTUPINFOW = unsafe { zeroed() };
         startup_info.cb = size_of::<STARTUPINFOW>() as u32;
         let pipes = StandardPipes::create()?;
@@ -545,8 +572,8 @@ impl ManagedProcess {
                 null(),
                 null(),
                 1,
-                CREATE_SUSPENDED | CREATE_NO_WINDOW,
-                null(),
+                creation_flags,
+                environment_pointer,
                 current_directory.as_ptr(),
                 &startup_info,
                 &mut process_info,
@@ -698,21 +725,95 @@ fn quote_windows_argument(argument: &OsStr) -> Vec<u16> {
 }
 
 /// 为 CreateProcessW 构造包含 argv[0]、固定参数和脚本路径的可写命令行。
-fn build_command_line(executable: &Path, arguments: &[OsString]) -> Vec<u16> {
+fn build_command_line(
+    executable: &Path,
+    arguments: &[OsString],
+    raw_command_tail: Option<&OsString>,
+) -> Vec<u16> {
     let mut command_line = quote_windows_argument(executable.as_os_str());
     for argument in arguments {
         command_line.push(b' ' as u16);
-        command_line.extend(quote_windows_argument(argument));
+        if raw_command_tail.is_some() {
+            // CMD 使用自有命令行解析器；这里只消费 Runner 内固定 ASCII flags，不能套 CRT
+            // 引号，否则 `cmd.exe` 会把带引号的 switch 当成待执行命令。
+            command_line.extend(argument.encode_wide());
+        } else {
+            command_line.extend(quote_windows_argument(argument));
+        }
+    }
+    if let Some(raw_command_tail) = raw_command_tail {
+        command_line.push(b' ' as u16);
+        command_line.extend(raw_command_tail.encode_wide());
     }
     command_line.push(0);
     command_line
+}
+
+/// 把完整替换环境编码为大小写不敏感排序、无冲突且双 NUL 结尾的 UTF-16 块。
+fn build_unicode_environment_block(
+    entries: &std::collections::BTreeMap<String, OsString>,
+) -> Result<Vec<u16>, ManagedProcessError> {
+    let mut sorted_entries = entries.iter().collect::<Vec<_>>();
+    for (key, value) in &sorted_entries {
+        if key.is_empty()
+            || !key.is_ascii()
+            || key.contains('=')
+            || key.contains('\0')
+            || value.encode_wide().any(|unit| unit == 0)
+        {
+            return Err(ManagedProcessError::InvalidEnvironment);
+        }
+    }
+    sorted_entries.sort_by(|(left, _), (right, _)| {
+        windows_environment_sort_key(left).cmp(&windows_environment_sort_key(right))
+    });
+    if sorted_entries
+        .windows(2)
+        .any(|pair| windows_environment_key_eq(pair[0].0, pair[1].0))
+    {
+        return Err(ManagedProcessError::InvalidEnvironment);
+    }
+
+    let mut block = Vec::new();
+    for (key, value) in &sorted_entries {
+        let key_units = key.encode_utf16().collect::<Vec<_>>();
+        let value_units = value.encode_wide().collect::<Vec<_>>();
+        block.extend(key_units);
+        block.push(b'=' as u16);
+        block.extend(value_units);
+        block.push(0);
+    }
+    if sorted_entries.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    if block.len() > WINDOWS_ENVIRONMENT_MAX_UTF16_UNITS {
+        return Err(ManagedProcessError::InvalidEnvironment);
+    }
+    Ok(block)
+}
+
+/// 使用 Windows 环境名所需的 ASCII 大小写不敏感语义比较两个键。
+fn windows_environment_key_eq(left: &str, right: &str) -> bool {
+    windows_environment_sort_key(left) == windows_environment_sort_key(right)
+}
+
+/// 为环境块排序生成 Windows ASCII 大小写不敏感的稳定比较键。
+fn windows_environment_sort_key(value: &str) -> Vec<u8> {
+    value
+        .bytes()
+        .map(|byte| byte.to_ascii_uppercase())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     //! Job Object 受管进程的自然退出和整树取消测试。
 
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::fs;
+    use std::io::Read;
     use std::path::Path;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -725,10 +826,13 @@ mod tests {
     use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
 
     use super::{
-        ManagedProcess, ManagedProcessError, ManagedProcessOperation, PROCESS_SYNCHRONIZE_ACCESS,
+        build_unicode_environment_block, ManagedProcess, ManagedProcessError,
+        ManagedProcessOperation, PROCESS_SYNCHRONIZE_ACCESS,
     };
     use crate::execution::artifact::{ArtifactError, MaterializedScript, RenderedScript};
-    use crate::process::windows::runner::{ProcessLaunch, WindowsPowerShellRunner};
+    use crate::process::windows::runner::{
+        CmdRunner, ProcessLaunch, WindowsPowerShellRunner, CMD_CHCP_ENVIRONMENT_NAME,
+    };
 
     /// PowerShell 进程使用的安全临时工作目录。
     fn safe_working_directory() -> std::path::PathBuf {
@@ -857,5 +961,101 @@ mod tests {
         let pid = captured_pid.load(Ordering::SeqCst);
         assert_ne!(pid, 0, "失败注入前应取得 CreateProcessW 返回的 PID");
         wait_until_process_exits(pid);
+    }
+
+    /// 验证完全替换环境按 ASCII 大小写不敏感顺序编码并以双 NUL 结束。
+    #[test]
+    fn builds_sorted_double_nul_unicode_environment_block() {
+        let entries = BTreeMap::from([
+            ("zeta".to_owned(), OsString::from("日本語 😀")),
+            ("Alpha".to_owned(), OsString::from("中文")),
+        ]);
+
+        let block = build_unicode_environment_block(&entries).expect("合法替换环境应编码");
+        let expected = "Alpha=中文\0zeta=日本語 😀\0\0"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+
+        assert_eq!(block, expected);
+        assert_eq!(&block[block.len() - 2..], &[0, 0]);
+        assert_eq!(
+            build_unicode_environment_block(&BTreeMap::new()).expect("空环境应编码"),
+            vec![0, 0]
+        );
+    }
+
+    /// 验证大小写冲突、非 ASCII 键、NUL 与超限环境块在 CreateProcessW 前拒绝。
+    #[test]
+    fn rejects_invalid_or_oversized_replacement_environment() {
+        let cases = [
+            BTreeMap::from([
+                ("Path".to_owned(), OsString::from("one")),
+                ("PATH".to_owned(), OsString::from("two")),
+            ]),
+            BTreeMap::from([("中文".to_owned(), OsString::from("value"))]),
+            BTreeMap::from([("VALID".to_owned(), OsString::from("nul\0value"))]),
+            BTreeMap::from([("VALID".to_owned(), OsString::from("x".repeat(32_767)))]),
+        ];
+
+        for entries in cases {
+            assert!(matches!(
+                build_unicode_environment_block(&entries),
+                Err(ManagedProcessError::InvalidEnvironment)
+            ));
+        }
+    }
+
+    /// 验证含空格和 CMD 元字符的 Artifact 路径通过 launch-only 环境安全执行。
+    #[test]
+    fn runs_cmd_with_unicode_values_and_special_artifact_path() {
+        let root = std::env::temp_dir().join("CmdBox").join(format!(
+            "special CMD 空格 & % ^ ! ( ) ' {}",
+            uuid::Uuid::new_v4()
+        ));
+        let value = "中文 日本語 😀 space ' \" & % ^ ! ( ) < > | \\\\ tail";
+        let script = format!(
+            "@\"!{CMD_CHCP_ENVIRONMENT_NAME}!\" 65001 >nul\r\n@setlocal EnableExtensions EnableDelayedExpansion\r\n@echo off\r\necho(\r\necho(!CMDBOX_INTERNAL_VALUE_00000000!\r\n>&2 echo(stderr-日本語 😀\r\n@exit /b 7\r\n"
+        );
+        let artifact =
+            MaterializedScript::create_in_root_for_test(RenderedScript::cmd(&script), root.clone())
+                .expect("应在特殊路径创建 CMD Artifact");
+        let runner = CmdRunner::resolve().expect("系统应提供 CMD 与 chcp");
+        let launch = runner.process_launch_with_environment(
+            artifact,
+            &std::env::temp_dir(),
+            BTreeMap::from([(
+                "CMDBOX_INTERNAL_VALUE_00000000".to_owned(),
+                OsString::from(value),
+            )]),
+        );
+        let mut prepared = ManagedProcess::prepare(launch).expect("应准备受管 CMD");
+        let (mut stdout, mut stderr) = prepared
+            .take_output()
+            .expect("应取得 CMD 输出 Pipe")
+            .into_readers();
+        let process = prepared.resume().expect("应恢复受管 CMD");
+
+        let exit_code = process.wait().expect("CMD 应返回固定退出码");
+        process.terminate_job().expect("退出后应清理 Job");
+        process.wait_job_empty().expect("CMD Job 应为空");
+        let mut stdout_text = String::new();
+        let mut stderr_text = String::new();
+        stdout
+            .read_to_string(&mut stdout_text)
+            .expect("stdout 应为 UTF-8");
+        stderr
+            .read_to_string(&mut stderr_text)
+            .expect("stderr 应为 UTF-8");
+        drop(process);
+
+        assert_eq!(
+            exit_code, 7,
+            "CMD stderr={stderr_text:?}, stdout={stdout_text:?}"
+        );
+        assert_eq!(stdout_text, format!("\r\n{value}\r\n"));
+        assert_eq!(stderr_text, "stderr-日本語 😀\r\n");
+        assert!(root.is_dir(), "测试专属 Artifact 根应存在");
+        fs::remove_dir(&root).expect("唯一 Execution 目录清理后根目录应为空");
+        assert!(!root.exists(), "测试结束不得遗留 Artifact 根");
     }
 }

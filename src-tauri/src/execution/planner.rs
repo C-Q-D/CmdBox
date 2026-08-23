@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
@@ -18,13 +19,17 @@ use super::parameter::{
     validate_parameter_values, NormalizedParameterValue, NormalizedParameters,
     ParameterValidationError, ParameterValues,
 };
-use super::serializer::{render_windows_powershell, PowerShellRenderError, RenderedPowerShell};
+use super::serializer::{
+    render_cmd, render_windows_powershell, CmdRenderError, PowerShellRenderError,
+};
 use super::spec::CanonicalExecutionSpec;
 use super::template::{parse_template, TemplateError};
-use crate::process::windows::runner::{ProcessLaunch, ResolvedRunner, WindowsPowerShellRunner};
+use crate::process::windows::runner::{
+    CmdRunner, ProcessLaunch, ResolvedRunner, WindowsPowerShellRunner,
+};
 
 /// 当前 Canonical Execution Spec 二进制编码版本。
-const EXECUTION_SPEC_SCHEMA_VERSION: u32 = 1;
+const EXECUTION_SPEC_SCHEMA_VERSION: u32 = 2;
 
 /// 当前两个 normal Built-in 使用的不适用 Safety Policy 语义版本。
 const NORMAL_SAFETY_POLICY_VERSION: u32 = 1;
@@ -320,6 +325,8 @@ pub struct VerifiedExecution {
     resolved_runner: ResolvedRunner,
     /// 与 Hash 绑定的确定工作目录。
     working_directory: PathBuf,
+    /// CMD 完全替换环境中已进入 Hash 的 Definition 与参数绑定；PowerShell 为空。
+    environment: BTreeMap<String, OsString>,
 }
 
 /// 只输出授权值的非敏感结构摘要，不输出 Runner、工作目录或参数原值。
@@ -349,9 +356,14 @@ impl VerifiedExecution {
             rendered_script,
             resolved_runner,
             working_directory,
+            environment,
         } = self;
         let materialized_script = MaterializedScript::create(rendered_script)?;
-        Ok(resolved_runner.process_launch(materialized_script, &working_directory))
+        Ok(resolved_runner.process_launch_with_environment(
+            materialized_script,
+            &working_directory,
+            environment,
+        ))
     }
 }
 
@@ -369,7 +381,18 @@ pub(crate) fn verified_windows_powershell_for_test(
         resolved_runner: WindowsPowerShellRunner::resolve()
             .expect("测试系统应提供 Windows PowerShell"),
         working_directory,
+        environment: BTreeMap::new(),
     }
+}
+
+/// 两个 Serializer 投影到 Planner 所需的共同冻结结果。
+struct PreparedRendered {
+    /// Preview 展示的最终脚本文本。
+    script_text: String,
+    /// Preview 与 Run 共用的最终 Artifact 字节。
+    artifact: RenderedScript,
+    /// CMD 非空参数使用的确定性私有环境绑定；PowerShell 为空。
+    private_environment: BTreeMap<String, OsString>,
 }
 
 /// Preview 与 Run 复验共用的私有完整计算结果。
@@ -381,9 +404,11 @@ struct PreparedExecution {
     /// 当前系统重新解析得到的确定 Runner。
     resolved_runner: ResolvedRunner,
     /// 当前 AST 重新渲染得到的可读文本和完整 Artifact。
-    rendered: RenderedPowerShell,
+    rendered: PreparedRendered,
     /// 当前执行使用并进入 Hash 的确定工作目录。
     working_directory: PathBuf,
+    /// 启动时使用且已进入 Hash 的 Definition 与私有参数环境。
+    environment: BTreeMap<String, OsString>,
     /// 当前全部 Execution Spec 事实计算得到的 SHA-256。
     execution_spec_hash: String,
 }
@@ -445,6 +470,7 @@ impl ExecutionPlanner {
             rendered_script: prepared.rendered.artifact,
             resolved_runner: prepared.resolved_runner,
             working_directory: prepared.working_directory,
+            environment: prepared.environment,
         })
     }
 }
@@ -477,24 +503,57 @@ fn prepare_execution(
     definition: CommandBlockDefinition,
     parameter_values: &ParameterValues,
 ) -> Result<PreparedExecution, PlannerError> {
-    if definition.runner != RunnerType::WindowsPowerShell {
-        return Err(PlannerError::new(
-            PlannerErrorCode::UnsupportedRunner,
-            None,
-            None,
-        ));
-    }
-
     let normalized_parameters = validate_parameter_values(&definition.parameters, parameter_values)
         .map_err(planner_parameter_error)?;
     let ast = parse_template(&definition.template, &definition.parameters)
         .map_err(planner_template_error)?;
-    let rendered =
-        render_windows_powershell(&ast, &normalized_parameters).map_err(planner_render_error)?;
-    let resolved_runner = WindowsPowerShellRunner::resolve()
-        .map_err(|_| PlannerError::new(PlannerErrorCode::RunnerUnavailable, None, None))?;
+    let (rendered, resolved_runner) = match definition.runner {
+        RunnerType::WindowsPowerShell => {
+            if !definition.environment.is_empty() {
+                return Err(PlannerError::new(
+                    PlannerErrorCode::InternalContract,
+                    None,
+                    Some("powerShellEnvironmentMustInherit".to_owned()),
+                ));
+            }
+            let rendered = render_windows_powershell(&ast, &normalized_parameters)
+                .map_err(planner_render_error)?;
+            let runner = WindowsPowerShellRunner::resolve()
+                .map_err(|_| PlannerError::new(PlannerErrorCode::RunnerUnavailable, None, None))?;
+            (
+                PreparedRendered {
+                    script_text: rendered.script_text,
+                    artifact: rendered.artifact,
+                    private_environment: BTreeMap::new(),
+                },
+                runner,
+            )
+        }
+        RunnerType::Cmd => {
+            validate_cmd_definition_environment(&definition.environment)?;
+            let rendered =
+                render_cmd(&ast, &normalized_parameters).map_err(planner_cmd_render_error)?;
+            let runner = CmdRunner::resolve()
+                .map_err(|_| PlannerError::new(PlannerErrorCode::RunnerUnavailable, None, None))?;
+            (
+                PreparedRendered {
+                    script_text: rendered.script_text,
+                    artifact: rendered.artifact,
+                    private_environment: rendered.private_environment,
+                },
+                runner,
+            )
+        }
+    };
     let working_directory = std::env::temp_dir();
-    let explicit_environment = BTreeMap::new();
+    let explicit_environment = definition.environment.clone();
+    let mut environment = explicit_environment
+        .iter()
+        .map(|(name, value)| (name.clone(), OsString::from(value)))
+        .collect::<BTreeMap<_, _>>();
+    environment.extend(rendered.private_environment.clone());
+    let mut internal_environment = resolved_runner.fixed_environment().clone();
+    internal_environment.extend(rendered.private_environment.clone());
     let execution_spec_hash = CanonicalExecutionSpec {
         schema_version: EXECUTION_SPEC_SCHEMA_VERSION,
         command_block_id: definition.id.clone(),
@@ -502,10 +561,12 @@ fn prepare_execution(
         runner_type: resolved_runner.runner_type().as_str().to_owned(),
         runner_executable: resolved_runner.executable().to_path_buf(),
         runner_fixed_options: resolved_runner.fixed_arguments().to_vec(),
+        runner_raw_command_tail: resolved_runner.raw_command_tail().cloned(),
         artifact_hash: rendered.artifact.artifact_hash(),
         normalized_parameters: normalized_parameters.clone(),
         working_directory: working_directory.clone(),
         explicit_environment: explicit_environment.clone(),
+        internal_environment,
         safety_policy_version: NORMAL_SAFETY_POLICY_VERSION,
         outcome_policy_version: DEFAULT_OUTCOME_POLICY_VERSION,
     }
@@ -517,8 +578,46 @@ fn prepare_execution(
         resolved_runner,
         rendered,
         working_directory,
+        environment,
         execution_spec_hash,
     })
+}
+
+/// 校验 CMD Definition 环境键，并保护所有 `CMDBOX_INTERNAL_` 私有名称不被配置覆盖。
+fn validate_cmd_definition_environment(
+    environment: &BTreeMap<String, String>,
+) -> Result<(), PlannerError> {
+    let mut folded_names = std::collections::BTreeSet::new();
+    for (name, value) in environment {
+        if name.is_empty()
+            || !name.is_ascii()
+            || name.contains('=')
+            || name.contains('\0')
+            || value.contains('\0')
+        {
+            return Err(PlannerError::new(
+                PlannerErrorCode::InternalContract,
+                None,
+                Some("invalidCmdEnvironment".to_owned()),
+            ));
+        }
+        let folded = name.to_ascii_uppercase();
+        if folded.starts_with("CMDBOX_INTERNAL_") || folded == "SYSTEMROOT" {
+            return Err(PlannerError::new(
+                PlannerErrorCode::InternalContract,
+                None,
+                Some("reservedCmdEnvironmentName".to_owned()),
+            ));
+        }
+        if !folded_names.insert(folded) {
+            return Err(PlannerError::new(
+                PlannerErrorCode::InternalContract,
+                None,
+                Some("duplicateCmdEnvironmentName".to_owned()),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 将完整计算结果投影为有界显示 Response，展示截断不参与 Hash。
@@ -679,6 +778,22 @@ fn planner_render_error(error: PowerShellRenderError) -> PlannerError {
     )
 }
 
+/// 将 CMD 行级模板或值边界错误映射为不回显原值的稳定 Planner 契约。
+fn planner_cmd_render_error(error: CmdRenderError) -> PlannerError {
+    let code = if error.code.is_template_error() {
+        PlannerErrorCode::InvalidTemplate
+    } else if error.code.is_validation_error() {
+        PlannerErrorCode::ValidationFailed
+    } else {
+        PlannerErrorCode::InternalContract
+    };
+    PlannerError::new(
+        code,
+        error.parameter_key,
+        Some(error.code.as_str().to_owned()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     //! Planner 的 Definition、Preview、复验、摘要边界和无副作用 Hash 测试。
@@ -690,7 +805,8 @@ mod tests {
         PreviewCommandRequest, PreviewSafetyState, VerifyRunRequest,
     };
     use crate::execution::command::{
-        CommandBlockDefinition, CommandOrigin, RiskLevel, RunnerType, POWERSHELL_PARAMETER_ECHO_ID,
+        builtin_command_definitions, CommandBlockDefinition, CommandOrigin, RiskLevel, RunnerType,
+        CMD_PARAMETER_ECHO_ID, POWERSHELL_PARAMETER_ECHO_ID,
     };
     use crate::execution::parameter::{
         ParameterBase, ParameterDefinition, ParameterValue, TextParameterDefinition,
@@ -959,20 +1075,74 @@ mod tests {
         assert!(!error.to_string().contains("private"));
     }
 
-    /// 验证当前原子对 CMD 明确返回 unsupported，而不是误用 PowerShell Serializer。
+    /// 验证 CMD Built-in 通过同一 Planner 接口生成带固定 UTF-8 前导的可信 Preview。
     #[test]
-    fn rejects_cmd_until_cmd_serializer_atom() {
+    fn previews_cmd_through_the_same_planner_interface() {
         let planner = ExecutionPlanner::new();
-        let cmd = planner.list_command_blocks().remove(1);
-        let error = planner
+        let values = valid_values(true);
+        let preview = planner
             .preview(&PreviewCommandRequest {
-                command_block_id: cmd.id,
-                expected_revision: cmd.revision,
-                parameter_values: valid_values(true),
+                command_block_id: CMD_PARAMETER_ECHO_ID.to_owned(),
+                expected_revision: 1,
+                parameter_values: values.clone(),
             })
-            .expect_err("CMD 当前应稳定拒绝");
+            .expect("CMD Built-in 应生成 Preview");
+        let repeated = planner
+            .preview(&PreviewCommandRequest {
+                command_block_id: CMD_PARAMETER_ECHO_ID.to_owned(),
+                expected_revision: 1,
+                parameter_values: values.clone(),
+            })
+            .expect("相同 CMD 输入应再次生成 Preview");
 
-        assert_eq!(error.code, PlannerErrorCode::UnsupportedRunner);
+        assert_eq!(preview.runner, RunnerType::Cmd);
+        assert!(preview
+            .preview_text
+            .starts_with("@\"!CMDBOX_INTERNAL_CHCP!\" 65001 >nul\r\n@setlocal EnableExtensions EnableDelayedExpansion\r\n@echo off\r\n"));
+        assert_eq!(preview.full_size_bytes, preview.preview_text.len() as u64);
+        assert_eq!(preview.execution_spec_hash, repeated.execution_spec_hash);
+        planner
+            .verify_run(&VerifyRunRequest {
+                command_block_id: CMD_PARAMETER_ECHO_ID.to_owned(),
+                expected_revision: 1,
+                parameter_values: values,
+                execution_spec_hash: preview.execution_spec_hash,
+            })
+            .expect("CMD Run 应复用同一渲染、绑定与 Hash 路径");
+    }
+
+    /// 验证 Definition 环境不能以大小写变体覆盖 CMD 私有名称或 SystemRoot。
+    #[test]
+    fn rejects_cmd_definition_environment_collisions() {
+        for reserved_name in ["cmdbox_internal_chcp", "sYsTeMrOoT"] {
+            let mut definition = builtin_command_definitions()[1].clone();
+            definition
+                .environment
+                .insert(reserved_name.to_owned(), "attacker".to_owned());
+            let error = prepare_execution(definition, &valid_values(true))
+                .err()
+                .expect("CMD 固定环境不得被 Definition 覆盖");
+            assert_eq!(error.code, PlannerErrorCode::InternalContract);
+            assert_eq!(
+                error.detail_code.as_deref(),
+                Some("reservedCmdEnvironmentName")
+            );
+        }
+
+        let mut definition = builtin_command_definitions()[1].clone();
+        definition
+            .environment
+            .insert("Path".to_owned(), "one".to_owned());
+        definition
+            .environment
+            .insert("PATH".to_owned(), "two".to_owned());
+        let error = prepare_execution(definition, &valid_values(true))
+            .err()
+            .expect("Windows 大小写不敏感重复环境名应拒绝");
+        assert_eq!(
+            error.detail_code.as_deref(),
+            Some("duplicateCmdEnvironmentName")
+        );
     }
 
     /// 创建只含一个长 Text 的私有 Definition，用于证明展示截断与完整 Artifact Hash 分离。
@@ -999,6 +1169,7 @@ mod tests {
                 max_length: Some(1024),
                 placeholder: None,
             })],
+            environment: BTreeMap::new(),
         }
     }
 

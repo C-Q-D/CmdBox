@@ -3,6 +3,7 @@
 //! `RenderedScript` 在 Preview 之前冻结最终编码字节及 SHA-256；`MaterializedScript` 再为
 //! Execution 创建 CmdBox 临时根下的唯一目录和受控固定文件名。落盘后立即 flush 并按最终
 //! 字节 Hash 复验，进程启动前还会再次复验；目录所有权由 RAII 管理，调用方不能替换路径。
+//! PowerShell 使用 UTF-8 BOM `.ps1`，CMD 使用 UTF-8 无 BOM `.cmd`，编码差异在落盘前冻结。
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -21,6 +22,9 @@ const CMDBOX_TEMP_DIRECTORY_NAME: &str = "CmdBox";
 
 /// 临时 Windows PowerShell 脚本使用的固定文件名。
 const POWERSHELL_SCRIPT_FILE_NAME: &str = "script.ps1";
+
+/// 临时 CMD Batch 使用的固定文件名。
+const CMD_SCRIPT_FILE_NAME: &str = "script.cmd";
 
 /// 已冻结最终编码、受控文件类型与完整字节 Hash 的脚本。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +47,18 @@ impl RenderedScript {
         Self {
             bytes,
             file_name: POWERSHELL_SCRIPT_FILE_NAME,
+            artifact_hash,
+        }
+    }
+
+    /// 把已经规范化为 CRLF 的 CMD 文本冻结为 UTF-8 无 BOM 最终字节。
+    pub(crate) fn cmd(script: &str) -> Self {
+        debug_assert!(!script.as_bytes().starts_with(&UTF8_BOM));
+        let bytes = script.as_bytes().to_vec();
+        let artifact_hash = Sha256::digest(&bytes).into();
+        Self {
+            bytes,
+            file_name: CMD_SCRIPT_FILE_NAME,
             artifact_hash,
         }
     }
@@ -161,6 +177,23 @@ impl MaterializedScript {
     /// 创建唯一临时目录，写入已冻结的最终脚本字节并复验 expected SHA-256。
     pub fn create(rendered: RenderedScript) -> Result<Self, ArtifactError> {
         let root_directory = std::env::temp_dir().join(CMDBOX_TEMP_DIRECTORY_NAME);
+        Self::create_under_root(rendered, root_directory)
+    }
+
+    /// 在测试专属根目录创建真实 Artifact，用于覆盖合法但含 Shell 元字符的路径。
+    #[cfg(test)]
+    pub(crate) fn create_in_root_for_test(
+        rendered: RenderedScript,
+        root_directory: PathBuf,
+    ) -> Result<Self, ArtifactError> {
+        Self::create_under_root(rendered, root_directory)
+    }
+
+    /// 在指定 CmdBox 所有根目录下创建唯一 Execution 目录并写入最终脚本。
+    fn create_under_root(
+        rendered: RenderedScript,
+        root_directory: PathBuf,
+    ) -> Result<Self, ArtifactError> {
         fs::create_dir_all(&root_directory).map_err(|source| ArtifactError::Io {
             operation: ArtifactOperation::CreateRootDirectory,
             path: root_directory.clone(),
@@ -291,7 +324,9 @@ mod tests {
 
     use sha2::{Digest, Sha256};
 
-    use super::{ArtifactError, MaterializedScript, RenderedScript, UTF8_BOM};
+    use super::{
+        ArtifactError, MaterializedScript, RenderedScript, CMD_SCRIPT_FILE_NAME, UTF8_BOM,
+    };
 
     /// 验证中文脚本以 UTF-8 BOM 开头，并能通过未篡改的启动前复验。
     #[test]
@@ -320,6 +355,27 @@ mod tests {
         artifact
             .verify_before_spawn()
             .expect("未篡改脚本应通过复验");
+    }
+
+    /// 验证 CMD Artifact 使用 UTF-8 无 BOM、固定扩展名并保持 Serializer 提供的 CRLF。
+    #[test]
+    fn writes_cmd_as_utf8_without_bom_and_with_fixed_extension() {
+        let script = "@echo off\r\necho(中文\r\n";
+        let rendered = RenderedScript::cmd(script);
+
+        assert!(!rendered.bytes().starts_with(&UTF8_BOM));
+        assert_eq!(rendered.bytes(), script.as_bytes());
+        assert!(!script.replace("\r\n", "").contains('\n'));
+
+        let artifact = MaterializedScript::create(rendered).expect("应创建 CMD 临时脚本");
+        assert_eq!(
+            artifact
+                .script_path()
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(CMD_SCRIPT_FILE_NAME)
+        );
+        artifact.verify_before_spawn().expect("CMD 脚本应通过复验");
     }
 
     /// 验证创建后的任意字节变化都会在启动前被拒绝。

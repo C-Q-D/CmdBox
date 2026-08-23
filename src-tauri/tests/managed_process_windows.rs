@@ -38,6 +38,17 @@ fn read_pid(path: &Path) -> u32 {
         .expect("PID 应为 u32")
 }
 
+/// 读取 helper 回报的随机 Artifact 目录名，并限定为 UUID simple 的 32 位十六进制。
+fn read_artifact_directory_name(path: &Path) -> String {
+    let name = fs::read_to_string(path).expect("应读取 Artifact 目录名");
+    assert_eq!(name.len(), 32, "Artifact 目录名长度应固定");
+    assert!(
+        name.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "Artifact 目录名只能包含十六进制字符"
+    );
+    name
+}
+
 /// 等待指定 PID 退出；无法打开句柄表示它已经退出或不可访问，也满足本测试目的。
 fn wait_until_process_exits(pid: u32) {
     // SAFETY: 只请求 SYNCHRONIZE，不修改目标进程；成功句柄在本函数中关闭一次。
@@ -69,11 +80,18 @@ fn killing_core_helper_stops_managed_process_tree() {
     wait_until_ready(&control_directory.join("ready"));
     let root_pid = read_pid(&control_directory.join("root.pid"));
     let child_pid = read_pid(&control_directory.join("child.pid"));
+    let artifact_directory_name =
+        read_artifact_directory_name(&control_directory.join("artifact-directory.name"));
+    let artifact_root = std::env::temp_dir().join("CmdBox");
+    let artifact_directory = artifact_root.join(artifact_directory_name);
+    assert_eq!(artifact_directory.parent(), Some(artifact_root.as_path()));
 
     helper.kill().expect("应强制结束 Core helper");
     helper.wait().expect("应回收 Core helper");
     wait_until_process_exits(root_pid);
     wait_until_process_exits(child_pid);
 
+    fs::remove_dir_all(&artifact_directory).expect("应清理强退 helper 无法 RAII 回收的 Artifact");
+    assert!(!artifact_directory.exists(), "测试不得遗留受管 Artifact");
     fs::remove_dir_all(&control_directory).expect("应清理唯一测试控制目录");
 }

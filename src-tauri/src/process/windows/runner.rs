@@ -1,9 +1,10 @@
-//! Windows PowerShell 5.1 Runner 解析与字段私有的进程启动值构造。
+//! Windows PowerShell 5.1 与 CMD Runner 解析及字段私有的进程启动值构造。
 //!
 //! 本文件通过 Windows 系统目录 API 解析绝对可执行文件，不读取可变 `PATH`，并集中维护
-//! CmdBox 一次性非交互 PowerShell 任务的固定启动参数。`ResolvedRunner` 只接受受管临时
-//! 脚本租约并生成 `ProcessLaunch`，后者是 Win32 进程模块唯一消费的内部启动接缝。
+//! CmdBox 一次性非交互任务的固定启动参数。CMD 额外确定解析 `chcp.com`，并以固定 raw
+//! command tail 和启动专用环境变量承载随机 Artifact 路径；任何用户值都不会进入命令行。
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
@@ -21,6 +22,21 @@ const INITIAL_SYSTEM_DIRECTORY_BUFFER: usize = 260;
 /// Windows PowerShell 在系统目录下的固定相对位置。
 const WINDOWS_POWERSHELL_RELATIVE_PATH: [&str; 3] = ["WindowsPowerShell", "v1.0", "powershell.exe"];
 
+/// CMD 在 Windows 系统目录中的固定文件名。
+const CMD_EXECUTABLE_FILE_NAME: &str = "cmd.exe";
+
+/// 切换 CMD Code Page 的系统工具固定文件名。
+const CHCP_EXECUTABLE_FILE_NAME: &str = "chcp.com";
+
+/// CMD 启动时绑定随机 `.cmd` 路径的内部保留环境变量名。
+pub(crate) const CMD_ARTIFACT_ENVIRONMENT_NAME: &str = "CMDBOX_INTERNAL_ARTIFACT";
+
+/// CMD Batch ASCII 前导绑定确定 `chcp.com` 路径的内部保留环境变量名。
+pub(crate) const CMD_CHCP_ENVIRONMENT_NAME: &str = "CMDBOX_INTERNAL_CHCP";
+
+/// CMD 分派 Batch 时必需、由系统目录确定推导并进入 Hash 的 Windows 根环境名。
+pub(crate) const CMD_SYSTEM_ROOT_ENVIRONMENT_NAME: &str = "SystemRoot";
+
 /// Windows PowerShell Runner 解析失败。
 #[derive(Debug)]
 pub enum RunnerResolveError {
@@ -35,6 +51,8 @@ pub enum RunnerResolveError {
     },
     /// 固定位置的 Windows PowerShell 可执行文件不存在或不是普通文件。
     ExecutableUnavailable(PathBuf),
+    /// 系统目录无法确定推导出有效 Windows 根目录。
+    SystemRootUnavailable(PathBuf),
 }
 
 /// 输出面向开发者的 Runner 解析错误说明。
@@ -46,14 +64,21 @@ impl Display for RunnerResolveError {
             }
             Self::ExecutableMetadata { path, source } => write!(
                 formatter,
-                "无法读取系统 Windows PowerShell 元数据（{}）：{source}",
+                "无法读取系统 Runner 元数据（{}）：{source}",
                 path.display()
             ),
             Self::ExecutableUnavailable(path) => write!(
                 formatter,
-                "系统 Windows PowerShell 可执行文件不可用：{}",
+                "系统 Runner 可执行文件不可用：{}",
                 path.display()
             ),
+            Self::SystemRootUnavailable(path) => {
+                write!(
+                    formatter,
+                    "无法从系统目录确定 Windows 根目录：{}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -65,6 +90,7 @@ impl Error for RunnerResolveError {
             Self::SystemDirectory(source) => Some(source),
             Self::ExecutableMetadata { source, .. } => Some(source),
             Self::ExecutableUnavailable(_) => None,
+            Self::SystemRootUnavailable(_) => None,
         }
     }
 }
@@ -74,6 +100,8 @@ impl Error for RunnerResolveError {
 pub enum RunnerType {
     /// 系统自带 Windows PowerShell 5.1。
     WindowsPowerShell,
+    /// 系统自带 CMD。
+    Cmd,
 }
 
 impl RunnerType {
@@ -81,6 +109,7 @@ impl RunnerType {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::WindowsPowerShell => "windowsPowerShell",
+            Self::Cmd => "cmd",
         }
     }
 }
@@ -89,6 +118,28 @@ impl RunnerType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowsPowerShellRunner;
 
+/// 系统自带 CMD 与同目录 `chcp.com` 的确定性解析入口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CmdRunner;
+
+/// CreateProcessW 对当前 Runner 使用的环境来源。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProcessLaunchEnvironment {
+    /// 保持 PowerShell 既有行为，由 Windows 继承父进程环境。
+    Inherit,
+    /// CMD 使用完全替换环境，避免未进 Hash 的父环境影响执行语义。
+    Replace(BTreeMap<String, OsString>),
+}
+
+/// 临时脚本路径进入 Runner 的唯一受控方式。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScriptPathBinding {
+    /// PowerShell 通过标准 Windows argv quoting 接收 `-File` 后的路径参数。
+    Argument,
+    /// CMD 通过启动专用环境和固定 raw `/C` tail 展开随机 Artifact 路径。
+    Environment(&'static str),
+}
+
 /// 已确定可执行文件与固定参数、尚未绑定临时脚本路径的 Runner。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRunner {
@@ -96,8 +147,16 @@ pub struct ResolvedRunner {
     runner_type: RunnerType,
     /// 由 Windows 系统目录推导出的绝对可执行文件路径。
     executable: PathBuf,
-    /// 脚本路径之前的固定参数，顺序属于 Runner 执行语义。
-    arguments_before_script: Vec<OsString>,
+    /// 不含动态脚本路径的固定参数，顺序属于 Runner 执行语义。
+    fixed_arguments: Vec<OsString>,
+    /// CMD `/C` 使用的固定 raw tail；PowerShell 没有该字段。
+    raw_command_tail: Option<OsString>,
+    /// 当前 Runner 绑定动态 Artifact 路径的受控方式。
+    script_path_binding: ScriptPathBinding,
+    /// Runner 自身必须注入且进入 Canonical Spec 的确定环境，例如绝对 `chcp.com`。
+    fixed_environment: BTreeMap<String, OsString>,
+    /// 当前 Runner 的环境继承策略。
+    environment_replacement: bool,
 }
 
 /// 字段私有、已绑定受管脚本租约与完整 Win32 启动参数的进程启动值。
@@ -107,8 +166,12 @@ pub struct ProcessLaunch {
     executable: PathBuf,
     /// 包含固定 Runner 选项与受管脚本路径的完整 argv。
     arguments: Vec<OsString>,
+    /// CMD `/C` 之后无需 CRT quoting 的固定 raw command tail。
+    raw_command_tail: Option<OsString>,
     /// 由上层 Execution 选择、仍需进程内核验证的工作目录。
     working_directory: PathBuf,
+    /// PowerShell 继承父环境；CMD 只使用完整确定的替换环境。
+    environment: ProcessLaunchEnvironment,
     /// 保持临时脚本及其唯一目录到受管进程生命周期结束的 RAII 租约。
     materialized_script: MaterializedScript,
 }
@@ -139,7 +202,7 @@ impl WindowsPowerShellRunner {
         Ok(ResolvedRunner {
             runner_type: RunnerType::WindowsPowerShell,
             executable,
-            arguments_before_script: vec![
+            fixed_arguments: vec![
                 OsString::from("-NoLogo"),
                 OsString::from("-NoProfile"),
                 OsString::from("-NonInteractive"),
@@ -147,6 +210,55 @@ impl WindowsPowerShellRunner {
                 OsString::from("Bypass"),
                 OsString::from("-File"),
             ],
+            raw_command_tail: None,
+            script_path_binding: ScriptPathBinding::Argument,
+            fixed_environment: BTreeMap::new(),
+            environment_replacement: false,
+        })
+    }
+}
+
+impl CmdRunner {
+    /// 从 Windows 系统目录解析 `cmd.exe` 与 `chcp.com`，不读取 `PATH` 或 ComSpec。
+    pub fn resolve() -> Result<ResolvedRunner, RunnerResolveError> {
+        let system_directory = system_directory()?;
+        let system_root = system_directory
+            .parent()
+            .filter(|path| path.is_absolute() && path.is_dir())
+            .ok_or_else(|| RunnerResolveError::SystemRootUnavailable(system_directory.clone()))?
+            .to_path_buf();
+        let executable = system_directory.join(CMD_EXECUTABLE_FILE_NAME);
+        ensure_regular_file(&executable)?;
+        let chcp = system_directory.join(CHCP_EXECUTABLE_FILE_NAME);
+        ensure_regular_file(&chcp)?;
+
+        let mut fixed_environment = BTreeMap::new();
+        fixed_environment.insert(
+            CMD_CHCP_ENVIRONMENT_NAME.to_owned(),
+            chcp.as_os_str().to_owned(),
+        );
+        fixed_environment.insert(
+            CMD_SYSTEM_ROOT_ENVIRONMENT_NAME.to_owned(),
+            system_root.as_os_str().to_owned(),
+        );
+        Ok(ResolvedRunner {
+            runner_type: RunnerType::Cmd,
+            executable,
+            fixed_arguments: vec![
+                OsString::from("/D"),
+                OsString::from("/Q"),
+                OsString::from("/A"),
+                OsString::from("/E:ON"),
+                OsString::from("/V:ON"),
+                OsString::from("/S"),
+                OsString::from("/C"),
+            ],
+            raw_command_tail: Some(OsString::from(format!(
+                "\"\"!{CMD_ARTIFACT_ENVIRONMENT_NAME}!\"\""
+            ))),
+            script_path_binding: ScriptPathBinding::Environment(CMD_ARTIFACT_ENVIRONMENT_NAME),
+            fixed_environment,
+            environment_replacement: true,
         })
     }
 }
@@ -164,7 +276,17 @@ impl ResolvedRunner {
 
     /// 返回动态脚本路径之前的固定 Runner 选项，供 Canonical Execution Spec 绑定执行语义。
     pub(crate) fn fixed_arguments(&self) -> &[OsString] {
-        &self.arguments_before_script
+        &self.fixed_arguments
+    }
+
+    /// 返回固定 raw command tail；该值属于 CMD 执行语义并必须进入 Canonical Spec。
+    pub(crate) fn raw_command_tail(&self) -> Option<&OsString> {
+        self.raw_command_tail.as_ref()
+    }
+
+    /// 返回 Runner 自身需要且必须进入 Canonical Spec 的确定内部环境。
+    pub(crate) fn fixed_environment(&self) -> &BTreeMap<String, OsString> {
+        &self.fixed_environment
     }
 
     /// 绑定一个受管临时脚本与工作目录，生成字段私有的完整进程启动值。
@@ -173,20 +295,54 @@ impl ResolvedRunner {
         materialized_script: MaterializedScript,
         working_directory: &Path,
     ) -> ProcessLaunch {
-        let arguments = self.script_arguments(materialized_script.script_path());
+        self.process_launch_with_environment(
+            materialized_script,
+            working_directory,
+            BTreeMap::new(),
+        )
+    }
+
+    /// 绑定已经进入 Canonical Spec 的环境覆盖与受管脚本，生成不可变启动值。
+    pub(crate) fn process_launch_with_environment(
+        self,
+        materialized_script: MaterializedScript,
+        working_directory: &Path,
+        mut environment_overrides: BTreeMap<String, OsString>,
+    ) -> ProcessLaunch {
+        for (name, value) in &self.fixed_environment {
+            environment_overrides.insert(name.clone(), value.clone());
+        }
+        let arguments = match self.script_path_binding {
+            ScriptPathBinding::Argument => {
+                let mut arguments = self.fixed_arguments.clone();
+                arguments.push(materialized_script.script_path().as_os_str().to_owned());
+                arguments
+            }
+            ScriptPathBinding::Environment(name) => {
+                environment_overrides.insert(
+                    name.to_owned(),
+                    materialized_script.script_path().as_os_str().to_owned(),
+                );
+                self.fixed_arguments.clone()
+            }
+        };
+        let environment = if self.environment_replacement {
+            ProcessLaunchEnvironment::Replace(environment_overrides)
+        } else {
+            debug_assert!(
+                environment_overrides.is_empty(),
+                "PowerShell 基线不得通过替换环境改变继承语义"
+            );
+            ProcessLaunchEnvironment::Inherit
+        };
         ProcessLaunch {
             executable: self.executable,
             arguments,
+            raw_command_tail: self.raw_command_tail,
             working_directory: working_directory.to_path_buf(),
+            environment,
             materialized_script,
         }
-    }
-
-    /// 为一个受管脚本路径追加固定、非交互且不加载用户 Profile 的完整参数。
-    fn script_arguments(&self, script_path: &Path) -> Vec<OsString> {
-        let mut arguments = self.arguments_before_script.clone();
-        arguments.push(script_path.as_os_str().to_owned());
-        arguments
     }
 }
 
@@ -210,9 +366,19 @@ impl ProcessLaunch {
         &self.arguments
     }
 
+    /// 返回 CMD 专用固定 raw command tail；PowerShell 为 `None`。
+    pub(crate) fn raw_command_tail(&self) -> Option<&OsString> {
+        self.raw_command_tail.as_ref()
+    }
+
     /// 返回调用方选择且由进程内核再次验证的工作目录。
     pub(crate) fn working_directory(&self) -> &Path {
         &self.working_directory
+    }
+
+    /// 返回 CreateProcessW 使用的继承或完全替换环境模式。
+    pub(crate) fn environment(&self) -> &ProcessLaunchEnvironment {
+        &self.environment
     }
 
     /// 紧邻 CreateProcessW 前复验当前启动值持有的脚本字节 Hash。
@@ -244,6 +410,27 @@ fn system_directory() -> Result<PathBuf, RunnerResolveError> {
     }
 }
 
+/// 确认从系统目录推导出的 Runner 或辅助工具路径是绝对普通文件。
+fn ensure_regular_file(path: &Path) -> Result<(), RunnerResolveError> {
+    if !path.is_absolute() {
+        return Err(RunnerResolveError::ExecutableUnavailable(
+            path.to_path_buf(),
+        ));
+    }
+    let metadata = path
+        .metadata()
+        .map_err(|source| RunnerResolveError::ExecutableMetadata {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if !metadata.is_file() {
+        return Err(RunnerResolveError::ExecutableUnavailable(
+            path.to_path_buf(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     //! Windows PowerShell Runner 的真实系统解析与稳定参数测试。
@@ -251,7 +438,10 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::sync::Mutex;
 
-    use super::{RunnerType, WindowsPowerShellRunner};
+    use super::{
+        CmdRunner, ProcessLaunchEnvironment, RunnerType, WindowsPowerShellRunner,
+        CMD_ARTIFACT_ENVIRONMENT_NAME, CMD_CHCP_ENVIRONMENT_NAME, CMD_SYSTEM_ROOT_ENVIRONMENT_NAME,
+    };
     use crate::execution::artifact::{MaterializedScript, RenderedScript};
 
     /// 串行保护进程级 `PATH` 修改，避免本模块测试彼此污染。
@@ -342,5 +532,83 @@ mod tests {
                 script_path.as_os_str().to_owned(),
             ]
         );
+        assert_eq!(launch.raw_command_tail(), None);
+        assert_eq!(launch.environment(), &ProcessLaunchEnvironment::Inherit);
+    }
+
+    /// 验证 CMD 与 chcp 都从 System32 解析，且伪造 PATH 不影响固定路径和参数。
+    #[test]
+    fn resolves_cmd_and_chcp_without_path() {
+        let _lock = PATH_ENVIRONMENT_LOCK
+            .lock()
+            .expect("PATH 测试互斥锁不应中毒");
+        let baseline = CmdRunner::resolve().expect("系统应提供 CMD 与 chcp");
+        let fake_path = OsStr::new(r"Z:\CmdBox\fake-cmd-and-chcp");
+        let _environment = PathEnvironmentGuard::replace(fake_path);
+        let resolved = CmdRunner::resolve().expect("CMD 解析不应依赖 PATH");
+
+        assert_eq!(resolved.executable(), baseline.executable());
+        assert_eq!(resolved.runner_type(), RunnerType::Cmd);
+        assert_eq!(resolved.runner_type().as_str(), "cmd");
+        assert_eq!(
+            resolved
+                .executable()
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("cmd.exe")
+        );
+        let chcp = resolved
+            .fixed_environment()
+            .get(CMD_CHCP_ENVIRONMENT_NAME)
+            .expect("CMD 应绑定绝对 chcp");
+        assert!(std::path::Path::new(chcp).is_absolute());
+        assert!(std::path::Path::new(chcp).is_file());
+        let system_root = resolved
+            .fixed_environment()
+            .get(CMD_SYSTEM_ROOT_ENVIRONMENT_NAME)
+            .expect("CMD 应绑定确定 SystemRoot");
+        assert!(std::path::Path::new(system_root).is_absolute());
+        assert!(std::path::Path::new(system_root).is_dir());
+    }
+
+    /// 验证 CMD 固定 flags/raw tail 与 launch-only Artifact 环境绑定均不漂移。
+    #[test]
+    fn builds_stable_cmd_raw_tail_and_replacement_environment() {
+        let runner = CmdRunner::resolve().expect("系统应提供 CMD 与 chcp");
+        assert_eq!(
+            runner.fixed_arguments(),
+            ["/D", "/Q", "/A", "/E:ON", "/V:ON", "/S", "/C"].map(OsString::from)
+        );
+        assert_eq!(
+            runner.raw_command_tail(),
+            Some(&OsString::from("\"\"!CMDBOX_INTERNAL_ARTIFACT!\"\""))
+        );
+
+        let artifact = MaterializedScript::create(RenderedScript::cmd("@echo off\r\n"))
+            .expect("应创建 CMD 测试 Artifact");
+        let script_path = artifact.script_path().as_os_str().to_owned();
+        let launch = runner.process_launch_with_environment(
+            artifact,
+            &std::env::temp_dir(),
+            std::collections::BTreeMap::from([(
+                CMD_ARTIFACT_ENVIRONMENT_NAME.to_owned(),
+                OsString::from("attacker-controlled"),
+            )]),
+        );
+
+        assert_eq!(launch.arguments().len(), 7);
+        assert_eq!(
+            launch.raw_command_tail(),
+            Some(&OsString::from("\"\"!CMDBOX_INTERNAL_ARTIFACT!\"\""))
+        );
+        let ProcessLaunchEnvironment::Replace(environment) = launch.environment() else {
+            panic!("CMD 必须使用完全替换环境");
+        };
+        assert_eq!(
+            environment.get(CMD_ARTIFACT_ENVIRONMENT_NAME),
+            Some(&script_path)
+        );
+        assert!(environment.contains_key(CMD_CHCP_ENVIRONMENT_NAME));
+        assert!(environment.contains_key(CMD_SYSTEM_ROOT_ENVIRONMENT_NAME));
     }
 }
