@@ -97,7 +97,7 @@ CMD02-TEMPLATE-01┘                                      │
 
 ## CMD02-PREVIEW-01 生成可信 PowerShell Preview
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：用户提交 PowerShell Block 参数后得到 Rust 规范化摘要、可读脚本和绑定完整执行规范的 Hash。
 - 唯一目标：以深模块 `ExecutionPlanner` 统一 Preview 与 Run 复验计算。
 - 当前行为与目标行为：已有参数语义和受管启动值但没有 Preview；完成后 Planner 能生成 PowerShell Preview，并以同一内部路径产出私有 `VerifiedExecution`。
@@ -117,6 +117,11 @@ CMD02-TEMPLATE-01┘                                      │
 - 风险等级：L3
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(core): [CMD02-PREVIEW-01] 生成可信 PowerShell Preview`
+
+### 执行记录
+
+- 实际交付：新增唯一 `ExecutionPlanner`、PowerShell 单引号 Serializer、有 Schema Version 的 length-prefixed Canonical Execution Spec、规范化有界摘要、完整 Artifact 大小与 Preview Hash；Run 复验先区分 revision conflict，再以同一路径全量重建并比较 Hash。内部 Definition/模板不进入 list/get DTO，请求拒绝未知旁路字段；`VerifiedExecution` 只能经 crate 内消费入口生成字段私有的 `ProcessLaunch`。
+- 实际验证：Planner 9 项、Serializer 3 项、Canonical Spec 3 项及 sibling 消费边界测试通过；完整 Rust 单元测试 60 项、Windows 集成 1 项通过；`cargo fmt --check`、strict Clippy 和 `git diff --check` 通过。限定复核发现授权值无法被 Session 消费、list/get 会暴露内部模板，均按最小接口修正并加入回归测试；本原子未新增临时脚本、线程或进程测试。
 
 ## CMD02-PS-RUN-01 接通 PowerShell Preview 执行
 

@@ -57,7 +57,7 @@ pub enum RiskLevel {
 /// Rust Core 提供给后续 Preview 流程的不可变 Command Block Definition。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CommandBlockDefinition {
+pub(crate) struct CommandBlockDefinition {
     /// Command Block 的稳定身份。
     pub id: String,
     /// Command Workspace 展示的名称。
@@ -79,7 +79,7 @@ pub struct CommandBlockDefinition {
 }
 
 /// 按稳定顺序返回 PowerShell 和 CMD 两个正常风险参数回显 Built-in。
-pub fn builtin_command_definitions() -> [CommandBlockDefinition; 2] {
+pub(crate) fn builtin_command_definitions() -> [CommandBlockDefinition; 2] {
     [
         CommandBlockDefinition {
             id: POWERSHELL_PARAMETER_ECHO_ID.to_owned(),

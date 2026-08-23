@@ -391,7 +391,7 @@ impl Display for ParameterValidationError {
 impl Error for ParameterValidationError {}
 
 /// 严格校验全部结构化值，并按 Definition 顺序返回确定的规范化结果。
-pub fn validate_parameter_values(
+pub(crate) fn validate_parameter_values(
     definitions: &[ParameterDefinition],
     values: &ParameterValues,
 ) -> Result<NormalizedParameters, ParameterValidationError> {

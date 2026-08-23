@@ -169,7 +169,7 @@ struct OpenBlock {
 }
 
 /// 把受限模板解析为确定 AST，并校验所有变量与当前 Definition 的类型关系。
-pub fn parse_template(
+pub(crate) fn parse_template(
     template: &str,
     definitions: &[ParameterDefinition],
 ) -> Result<TemplateAst, TemplateError> {

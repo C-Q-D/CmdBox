@@ -80,7 +80,7 @@ impl RunnerType {
     /// 返回供后续 IPC 契约复用的稳定 camelCase 标识。
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::WindowsPowerShell => "windowsPowershell",
+            Self::WindowsPowerShell => "windowsPowerShell",
         }
     }
 }
@@ -160,6 +160,11 @@ impl ResolvedRunner {
     /// 返回确定的 Windows PowerShell 可执行文件绝对路径。
     pub fn executable(&self) -> &Path {
         &self.executable
+    }
+
+    /// 返回动态脚本路径之前的固定 Runner 选项，供 Canonical Execution Spec 绑定执行语义。
+    pub(crate) fn fixed_arguments(&self) -> &[OsString] {
+        &self.arguments_before_script
     }
 
     /// 绑定一个受管临时脚本与工作目录，生成字段私有的完整进程启动值。
@@ -284,7 +289,7 @@ mod tests {
             Some("powershell.exe")
         );
         assert_eq!(runner.runner_type(), RunnerType::WindowsPowerShell);
-        assert_eq!(runner.runner_type().as_str(), "windowsPowershell");
+        assert_eq!(runner.runner_type().as_str(), "windowsPowerShell");
     }
 
     /// 验证伪造 `PATH` 不会改变 Runner 的系统目录解析结果。

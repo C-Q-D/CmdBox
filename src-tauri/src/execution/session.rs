@@ -513,8 +513,19 @@ mod tests {
     use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
 
     use super::{ExecutionEvent, ExecutionManager, StartedExecution};
+    use crate::execution::artifact::ArtifactError;
     use crate::execution::manager::ActiveExecutionState;
     use crate::execution::output::OutputStream;
+    use crate::execution::planner::VerifiedExecution;
+    use crate::process::windows::runner::ProcessLaunch;
+
+    /// 以 sibling 模块编译边界证明 Session 能消费授权值，但不能取得或改写其私有字段。
+    #[test]
+    fn accepts_verified_execution_through_single_consuming_launch_boundary() {
+        let boundary: fn(VerifiedExecution) -> Result<ProcessLaunch, ArtifactError> =
+            VerifiedExecution::into_process_launch;
+        let _ = boundary;
+    }
 
     /// 在统一截止时间内读取到唯一终态，并返回包括 Started/Output 在内的完整事件序列。
     fn collect_until_terminal(started: &StartedExecution) -> Vec<ExecutionEvent> {
