@@ -70,7 +70,7 @@ CMD02-TEMPLATE-01┘                                      │
 
 ## CMD02-TEMPLATE-01 建立类型化参数与受限模板
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：六类 Parameter Value 由 Rust 按当前 Definition 严格校验，模板只能用已冻结的三类节点表达。
 - 唯一目标：从内置 Command Block Definition 与结构化值生成确定、有序的模板语义。
 - 当前行为与目标行为：当前后端没有 Command Block 或模板；完成后具有两个无破坏内置 Definition、严格参数校验和 `value/if/each` AST，但尚不生成可执行 Preview。
@@ -90,6 +90,10 @@ CMD02-TEMPLATE-01┘                                      │
 - 风险等级：L2
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(core): [CMD02-TEMPLATE-01] 建立类型化参数与受限模板`
+
+### 执行记录
+
+- 实际验证：Parameter 9 项、Template 7 项、Command 2 项窄测通过；完整 Rust 单元测试 42 项、Windows 集成 1 项通过；`cargo fmt --check` 和 `git diff --check` 通过。限定复核发现大数 Number 步长容差可错误接受半步值，红测复现后将容差限制为严格小于半步，回归测试通过，其余契约无阻断问题。
 
 ## CMD02-PREVIEW-01 生成可信 PowerShell Preview
 
