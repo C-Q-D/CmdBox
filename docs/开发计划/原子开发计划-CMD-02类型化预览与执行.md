@@ -212,7 +212,7 @@ CMD02-TEMPLATE-01┘                                      │
 
 ## CMD02-UI-FORM-01 渲染统一类型化参数表单
 
-- 状态：in_progress
+- 状态：done
 - 支持的验收场景：用户可切换两个真实 Built-in，并按 Definition 填写六类参数。
 - 唯一目标：让 Command Workspace 由后端 Summary/Definition 驱动统一 Parameter Form。
 - 当前行为与目标行为：当前索引是静态 Fixture 且只有固定项可用；完成后只显示后端真实 Built-in，使用同一表单映射，不执行或 Preview。
@@ -220,10 +220,10 @@ CMD02-TEMPLATE-01┘                                      │
 - 代码定位依据：`CommandWorkspace.tsx`、`command-data.ts`、新增 `ParameterForm.tsx`、`App.css`、`App.test.tsx`、`package.json` 和 `pnpm-lock.yaml`。
 - 允许修改：Definition/选择/表单相关 React、CSS、测试，以及技术设计已指定但尚未安装的 React Hook Form 与 Zod 精确依赖。
 - 明确不修改：Preview、Run/Cancel/Output 内核、命令专属页面或布局 DSL。
-- 实现步骤：安装并精确锁定 React Hook Form 与 Zod；加载真实 Summary 并选中第一项；切换时按 generation 丢弃迟到 Definition；用 Definition 默认值初始化 React Hook Form；由 Definition 构造只用于即时 UX 的 Zod 校验，Rust 仍是权威；固定 switch 映射六种控件；Folder/Folders 调用 Picker；参数变化保持 configuring 且不制造虚假 Preview；Execution 活跃时禁用切换和输入。
-- 接口、数据与错误契约：Parameter 顺序、label、description、required 和约束只来自 Definition；前端可做即时 UX 校验但 Rust 仍是权威。
-- 边界与异常：对话框取消不改变值；Folders 可移除；搜索只过滤真实 Summary；不显示虚假总数或未接入命令。
-- 测试要求：两个 Block 切换、六控件、默认值/约束、Picker 取消/选择/移除、搜索、迟到 Definition、运行中只读和参数变化失效。
+- 实现步骤：安装并精确锁定 React Hook Form 与 Zod；保留现有 `FixedExecutionGateway`、Execution phase、Run/Cancel/Output 代码原样，另增独立 `CommandExecutionGateway` 和 `FolderPicker` 注入点；加载真实 Summary 并选中第一项；切换时按独立 Definition generation 丢弃迟到响应并以 `id/revision/generation` 重建表单实例，完整重置 dirty/default 状态；默认记录只复制 Definition 明确给出的非 null 默认值，数组防御复制且不从约束或第一选项推导；由 Definition 构造只用于即时 UX 的 Zod 校验，Text 通过 `Array.from(value).length` 按 Unicode scalar 计数；固定 switch 映射六种控件；Folder/Folders 调用 Picker；参数变化保持 configuring 且不制造虚假 Preview；Execution 活跃时只通过既有 phase 锁定命令切换和输入。
+- 接口、数据与错误契约：Parameter 顺序、label、description、required 和约束只来自 Definition；表单以单一 `ParameterFormSnapshot { values, isValid }` 向 Workspace 交付防御性 wire 快照和即时 UX 门禁，供后续 Preview 只在基础校验通过后调用 Rust。中间态与 wire 记录以 `undefined` 区分未提交，并冻结为六类映射：Text 初始空占位不提交，用户编辑后清空提交显式 `""`；Number 空串不提交，只有有限 number 提交且 `0` 不得误判为空；Boolean 始终提交明确 `true/false`；Select 空占位不提交且不自动选择第一项；Folder 空占位不提交，Picker 结果原样提交；Folders 初始无值不提交，用户移除到空提交显式 `[]`。Definition 非 null 默认值启动时即复制到 wire 记录；Number/Select/Folder 清空后的省略语义由 Rust 按 Definition 重新应用默认值。Zod 不复现路径存在性、Windows 规范化或 Shell 规则，Rust 始终是最终权威。
+- 边界与异常：List/Definition 卸载或迟到响应不得落地；当前 generation 返回错误 ID 时收敛为安全 `IPC_FAILED`，revision 不符时收敛为 `REVISION_CONFLICT`，均结束 loading；Picker 同一时刻只允许一个请求，响应同时校验组件存活、Definition identity、字段 key、请求 token 和最新 Execution lock；Folders 返回时读取最新数组再追加，保留顺序与重复项，不覆盖或复活等待期间已移除的旧数组；取消保持原值、既有错误和 validity，一次返回超过 `maxItems` 时保留原值与原 wire 并显示错误；Folder 提供可访问的清空入口，Folders 按精确索引移除重复目录；所有字段错误通过稳定 ID、`aria-invalid` 和条件 `aria-describedby` 关联主控件；Execution 活跃时同时锁定命令切换、搜索和全部参数动作；搜索只过滤真实 Summary；不显示虚假总数或未接入命令。
+- 测试要求：两个 Block 切换、六控件、Definition 默认值与完整重置、六类中间态到 wire 的精确映射（含 optional 默认值清空语义）、Emoji scalar 长度、Number 清空/恢复/零值/非有限输入隔离、Picker 取消/选择/禁重入、迟到响应、等待期间移除后追加、重复目录精确索引移除、超限不截断且不改变 omitted wire、搜索、同 ID/revision 多 generation 的 List/Definition 乱序与卸载、Picker identity-only/lock-only/unmount 迟到、当前响应 ID/revision 不符、字段错误可访问关联、浏览器无 Gateway/Picker 降级、正式宿主只有通用 Gateway 时的准确状态、运行中全只读和参数变化保持 configuring；既有固定 Run、Cancel、事件认证、迟到取消和 Output 上限测试必须原样回归。
 - 验证命令：相关 Vitest、typecheck、Vite 构建。
 - 预期结果：同一 Workspace 能配置 PowerShell/CMD Block，不含 Shell 专属 React 分支。
 - 完成判定：表单可访问且保持现有 editorial-field-notes 网格和响应式。
@@ -233,9 +233,15 @@ CMD02-TEMPLATE-01┘                                      │
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(ui): [CMD02-UI-FORM-01] 渲染统一类型化参数表单`
 
+### 执行记录
+
+- 实际验证：精确锁定 `react-hook-form 7.86.0` 与 `zod 4.4.3`；Parameter Form 与 Workspace 定向测试 37 项、完整前端测试 52 项全部通过，`pnpm typecheck`、Vite production build 和 `git diff --check` 均通过。
+- 交付事实：Command Workspace 只显示 Rust 返回的真实 Summary/Details；统一表单覆盖 Text、Number、Boolean、Select、Folder、Folders 六类参数，并向 Workspace 交付防御性的 `ParameterFormSnapshot { values, isValid }`。目录选择、Definition 加载和执行期锁均以独立 generation/token 防止迟到写入，既有固定 Run/Cancel/Output 内核保持回归通过。
+- 安全与复核：前端未复制路径存在性、Windows 规范化或 Shell 校验，未调用通用 Preview/Run，未新增脚本、PID 或权限旁路。L2 修订后隔离复核结论为 `PASS`；本原子只运行前端类型、单元和构建检查，没有启动 GUI、Tauri Command Block 或真实 PowerShell/CMD 命令。
+
 ## CMD02-UI-PREVIEW-01 呈现 Rust Preview 与失效状态
 
-- 状态：pending
+- 状态：in_progress
 - 支持的验收场景：用户生成并检查当前参数对应的规范化 Preview，参数或命令变化后旧 Preview 立即不可执行。
 - 唯一目标：完成 Command Workspace 的 configuring → previewing → ready 流程。
 - 当前行为与目标行为：表单已有结构化值但没有 Preview；完成后只显示 Rust 返回的摘要、文本、大小、截断、安全和 Hash 状态。

@@ -28,7 +28,9 @@
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "2.7.2",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "react-hook-form": "7.86.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

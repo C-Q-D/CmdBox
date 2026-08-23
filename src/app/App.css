@@ -1,3 +1,4 @@
+/* Command Workspace 的 editorial-field-notes 视觉语法与响应式规则。 */
 :root {
   font-family:
     "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
@@ -531,6 +532,186 @@ button {
 
 .target-record {
   padding-block: 10px 22px;
+}
+
+.parameter-record {
+  min-height: 220px;
+}
+
+.parameter-form {
+  display: grid;
+  gap: 0;
+  margin-top: 12px;
+  border-top: 1px dashed var(--rule);
+}
+
+.parameter-field {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.42fr) minmax(220px, 1fr);
+  gap: 7px 24px;
+  padding: 18px 0;
+  border-bottom: 1px dashed var(--rule);
+}
+
+.parameter-field__heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.parameter-field__heading label {
+  font-family: var(--serif);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.parameter-field__type {
+  color: var(--signal-weak);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.parameter-field__description,
+.parameter-field__constraints,
+.parameter-field__error,
+.parameter-form-empty {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.parameter-field__description {
+  grid-column: 1;
+  color: var(--ink-muted);
+}
+
+.parameter-field > input,
+.parameter-field > select,
+.parameter-picker > input {
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 1px;
+  background: rgba(248, 245, 239, 0.58);
+  color: var(--ink);
+}
+
+.parameter-field > input:focus,
+.parameter-field > select:focus,
+.parameter-picker > input:focus {
+  border-color: var(--signal-strong);
+  outline: 1px solid var(--signal-strong);
+  outline-offset: 2px;
+}
+
+.parameter-field > input[type="checkbox"] {
+  width: 18px;
+  min-height: 18px;
+  margin: 8px 0;
+  accent-color: var(--signal-strong);
+}
+
+.parameter-field > input,
+.parameter-field > select,
+.parameter-field > .parameter-picker,
+.parameter-field__constraints,
+.parameter-field__error {
+  grid-column: 2;
+}
+
+.parameter-field__constraints {
+  color: var(--ink-muted);
+  font-family: var(--mono);
+}
+
+.parameter-field__error {
+  color: var(--signal-interesting);
+}
+
+.parameter-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.parameter-picker--folder {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.parameter-picker--multiple {
+  grid-template-columns: 1fr;
+  justify-items: start;
+}
+
+.parameter-picker button,
+.parameter-folder-list button {
+  min-height: 38px;
+  padding: 6px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 1px;
+  background: transparent;
+  color: var(--signal-strong);
+  cursor: pointer;
+}
+
+.parameter-picker button:hover:not(:disabled),
+.parameter-picker button:focus-visible,
+.parameter-folder-list button:hover:not(:disabled),
+.parameter-folder-list button:focus-visible {
+  border-color: var(--signal-strong);
+  outline: 1px solid var(--signal-strong);
+  outline-offset: 2px;
+}
+
+.parameter-field :disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.parameter-folder-list {
+  width: 100%;
+  margin: 2px 0 0;
+  padding: 0;
+  border: 1px dashed var(--rule);
+  list-style: none;
+}
+
+.parameter-folder-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 42px;
+  padding-left: 11px;
+}
+
+.parameter-folder-list li + li {
+  border-top: 1px dashed var(--rule);
+}
+
+.parameter-folder-list code {
+  overflow-wrap: anywhere;
+  color: var(--signal-strong);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.parameter-folder-list button {
+  min-height: 40px;
+  border-block: 0;
+  border-right: 0;
+}
+
+.parameter-form-empty {
+  margin-top: 14px;
+  padding: 18px;
+  border: 1px dashed var(--rule);
+  color: var(--ink-muted);
+  font-family: var(--serif);
 }
 
 .preview-record {
@@ -1284,6 +1465,28 @@ button {
     padding-left: 0;
     border-top: 1px dotted var(--rule);
     border-left: 0;
+  }
+
+  .parameter-field {
+    grid-template-columns: 1fr;
+    gap: 7px;
+  }
+
+  .parameter-field > input,
+  .parameter-field > select,
+  .parameter-field > .parameter-picker,
+  .parameter-field__description,
+  .parameter-field__constraints,
+  .parameter-field__error {
+    grid-column: 1;
+  }
+
+  .parameter-picker--folder {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .parameter-picker--folder input {
+    grid-column: 1 / -1;
   }
 
   .workspace-actions {
