@@ -1,5 +1,6 @@
-/** Command Workspace 的宿主降级、执行事件、取消和错误状态测试。 */
+/** Command Workspace 的 Definition、可信 Preview、执行回归和宿主降级测试。 */
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CommandWorkspace } from "../features/command-workspace/CommandWorkspace";
 import type {
@@ -8,6 +9,8 @@ import type {
   CommandExecutionGateway,
   ExecutionStreamEvent,
   FixedExecutionGateway,
+  PreviewCommandRequest,
+  PreviewCommandResponse,
 } from "../features/command-workspace/execution-gateway";
 import type { DesktopWindowControls } from "../features/command-workspace/desktop-window-controls";
 import type { FolderPicker } from "../features/command-workspace/folder-picker";
@@ -22,11 +25,14 @@ afterEach(function cleanupRenderedApp() {
 function createDeferred<T>() {
   /** 外部持有的解析器。 */
   let resolvePromise!: (value: T) => void;
+  /** 外部持有的拒绝器。 */
+  let rejectPromise!: (reason?: unknown) => void;
   /** 当前挂起的 Promise。 */
-  const promise = new Promise<T>((resolve) => {
+  const promise = new Promise<T>((resolve, reject) => {
     resolvePromise = resolve;
+    rejectPromise = reject;
   });
-  return { promise, resolve: resolvePromise };
+  return { promise, resolve: resolvePromise, reject: rejectPromise };
 }
 
 /** 创建可由测试主动推送后端事件的固定任务 Gateway。 */
@@ -141,30 +147,71 @@ function createCommandDetails(
   };
 }
 
-/** 创建只允许 list/get 的通用 Gateway，并记录 Preview/Run 不应被调用。 */
-function createCommandGatewayFixture() {
+/** 为当前请求创建包含可核验 Hash、摘要和安全结论的 Rust Preview 响应。 */
+function createPreviewResponse(
+  request: PreviewCommandRequest,
+  overrides: Partial<PreviewCommandResponse> = {},
+): PreviewCommandResponse {
+  return {
+    commandBlockId: request.commandBlockId,
+    revision: request.expectedRevision,
+    runner: "windowsPowerShell",
+    parameterSummaries: [
+      {
+        parameterKey: "text",
+        label: "文本",
+        displayValues: [String(request.parameterValues.text ?? "")],
+        totalCount: 1,
+        truncated: false,
+      },
+    ],
+    previewText: "Write-Output 'PowerShell 默认'",
+    fullSizeBytes: 38,
+    truncated: false,
+    riskLevel: "normal",
+    actionLabel: "执行当前命令",
+    safety: { state: "notApplicable", summary: null, warnings: [] },
+    executionSpecHash: "a".repeat(64),
+    ...overrides,
+  };
+}
+
+/** 创建通用 Gateway Fixture，可精确替换 Definition 集合与 Preview 时序。 */
+function createCommandGatewayFixture(options: {
+  /** 当前列表按 Rust 顺序返回的摘要。 */
+  summaries?: CommandBlockSummary[];
+  /** 当前摘要对应的详情。 */
+  details?: Map<string, CommandBlockDetails>;
+  /** 当前测试使用的 Preview 实现。 */
+  previewCommandBlock?: CommandExecutionGateway["previewCommandBlock"];
+} = {}) {
+  /** 当前 Fixture 返回的摘要集合。 */
+  const summaries = options.summaries ?? commandSummaries;
   /** 当前两条 Summary 对应的 Details。 */
-  const details = new Map<string, CommandBlockDetails>([
-    [commandSummaries[0].id, createCommandDetails(commandSummaries[0], "PowerShell 默认")],
-    [commandSummaries[1].id, createCommandDetails(commandSummaries[1], "CMD 默认")],
-  ]);
+  const details = options.details ?? new Map<string, CommandBlockDetails>([
+      [commandSummaries[0].id, createCommandDetails(commandSummaries[0], "PowerShell 默认")],
+      [commandSummaries[1].id, createCommandDetails(commandSummaries[1], "CMD 默认")],
+    ]);
   /** 通用 Gateway 的可观察替身。 */
   const gateway: CommandExecutionGateway = {
     /** 返回两条真实摘要的防御性数组。 */
-    listCommandBlocks: vi.fn(async () => [...commandSummaries]),
+    listCommandBlocks: vi.fn(async () => [...summaries]),
     /** 按业务 ID 返回当前测试详情。 */
     getCommandBlock: vi.fn(async (commandBlockId) => {
       const definition = details.get(commandBlockId);
       if (!definition) throw { code: "COMMAND_BLOCK_NOT_FOUND", message: "not found" };
       return definition;
     }),
-    /** UI-FORM 原子不得调用 Preview。 */
-    previewCommandBlock: vi.fn(async () => {
-      throw new Error("UI-FORM 不得调用 Preview");
-    }),
-    /** UI-FORM 原子不得调用通用 Run。 */
+    /** 按请求身份返回一份无副作用的可信 Preview。 */
+    previewCommandBlock: vi.fn(
+      options.previewCommandBlock ??
+        (async function previewCurrentRequest(request) {
+          return createPreviewResponse(request);
+        }),
+    ),
+    /** Preview 流程不得提前调用通用 Run。 */
     runCommandBlock: vi.fn(async () => {
-      throw new Error("UI-FORM 不得调用通用 Run");
+      throw new Error("Preview 流程不得调用通用 Run");
     }),
     /** 通用取消不是当前固定 Execution Gateway 的职责。 */
     cancelExecution: vi.fn(async () => ({ accepted: false, state: null })),
@@ -183,6 +230,15 @@ function renderConnectedWorkspace(gateway: FixedExecutionGateway | null = null) 
     />,
   );
   return { ...rendered, commandFixture };
+}
+
+/** 等待当前 Preview 动作真实可用后再点击，避免把快照 effect 时序混入业务断言。 */
+async function clickAvailablePreview(
+  name: "生成 Preview" | "重试 Preview" | "重新生成 Preview" = "生成 Preview",
+): Promise<void> {
+  const button = await screen.findByRole("button", { name });
+  await waitFor(() => expect(button).toHaveProperty("disabled", false));
+  fireEvent.click(button);
 }
 
 describe("CmdBox Command Workspace", function describeWorkspace() {
@@ -227,7 +283,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     expect(commandFixture.gateway.listCommandBlocks).toHaveBeenCalledOnce();
     expect(commandFixture.gateway.getCommandBlock).toHaveBeenCalledWith(commandSummaries[0].id);
     expect(screen.getByText("Windows PowerShell", { selector: ".runner-facts strong" })).toBeDefined();
-    expect(screen.getByText("正在配置参数", { selector: ".runner-facts strong" })).toBeDefined();
+    await waitFor(() => expect(screen.getByText("等待生成 Preview", { selector: ".runner-facts strong" })).toBeDefined());
     expect(screen.getByText("builtin", { selector: ".runner-note dd" })).toBeDefined();
     expect(screen.getByText("1", { selector: ".runner-note dd" })).toBeDefined();
     expect(commandFixture.gateway.previewCommandBlock).not.toHaveBeenCalled();
@@ -239,18 +295,726 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     expect(screen.queryByText(/工作目录/)).toBeNull();
 
     fireEvent.change(screen.getByRole("textbox", { name: /文本/ }), { target: { value: "新的有效值" } });
-    expect(screen.getByText("正在配置参数", { selector: ".runner-facts strong" })).toBeDefined();
+    await waitFor(() =>
+      expect(
+        screen.getByText("等待生成 Preview", {
+          selector: ".runner-facts strong",
+        }),
+      ).toBeDefined(),
+    );
   });
 
-  it("通用桌面 Gateway 已连接但固定 Execution 未接线时显示准确不可运行状态", async function showPendingRunWiring() {
+  it("只用当前有效结构化快照请求 Rust Preview 并显示可信 Ready 证据", async function renderTrustedPreview() {
+    const { commandFixture } = renderConnectedWorkspace();
+    await screen.findByRole("textbox", { name: /文本/ });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "生成 Preview" })).toHaveProperty("disabled", false));
+    await clickAvailablePreview();
+
+    await waitFor(() => {
+      expect(commandFixture.gateway.previewCommandBlock).toHaveBeenCalledWith({
+        commandBlockId: commandSummaries[0].id,
+        expectedRevision: commandSummaries[0].revision,
+        parameterValues: { text: "PowerShell 默认" },
+      });
+      expect(screen.getByText("Preview 已确认", { selector: ".runner-facts strong" })).toBeDefined();
+    });
+    expect(screen.getByText("Write-Output 'PowerShell 默认'")).toBeDefined();
+    expect(screen.getByText("38 bytes")).toBeDefined();
+    expect(screen.getByText("a".repeat(64))).toBeDefined();
+    expect(screen.getByRole("button", { name: "执行当前命令" })).toHaveProperty("disabled", true);
+    expect(screen.queryByRole("region", { name: "Safety Decision" })).toBeNull();
+    expect(commandFixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("同一 React 提交中的双击只创建一个 Preview 请求", async function preventDuplicatePreviewRequest() {
+    const pendingPreview = createDeferred<PreviewCommandResponse>();
+    const fixture = createCommandGatewayFixture({
+      previewCommandBlock: vi.fn(async function holdPreview() {
+        return pendingPreview.promise;
+      }),
+    });
+    render(
+      <CommandWorkspace
+        gateway={null}
+        commandGateway={fixture.gateway}
+        folderPicker={null}
+      />,
+    );
+    const previewButton = await screen.findByRole("button", {
+      name: "生成 Preview",
+    });
+    await waitFor(() =>
+      expect(previewButton).toHaveProperty("disabled", false),
+    );
+
+    act(() => {
+      previewButton.click();
+      previewButton.click();
+    });
+
+    expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledOnce();
+    expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("参数写入先同步建立 pending 门禁并拒绝同一提交中的旧按钮事件", async function blockPreviewBeforeSnapshotEffect() {
+    const fixture = createCommandGatewayFixture();
+    render(
+      <CommandWorkspace
+        gateway={null}
+        commandGateway={fixture.gateway}
+        folderPicker={null}
+      />,
+    );
+    const input = (await screen.findByRole("textbox", {
+      name: /文本/,
+    })) as HTMLInputElement;
+    const previewButton = screen.getByRole("button", {
+      name: "生成 Preview",
+    });
+    await waitFor(() =>
+      expect(previewButton).toHaveProperty("disabled", false),
+    );
+    /** 原生 setter 让 input 与旧按钮事件处于同一 React 提交，Parameter Form effect 尚未交付新快照。 */
+    const setNativeValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    if (!setNativeValue) {
+      throw new Error("测试环境缺少 HTMLInputElement.value setter");
+    }
+
+    act(() => {
+      setNativeValue.call(input, "pending current value");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      previewButton.removeAttribute("disabled");
+      previewButton.click();
+    });
+
+    expect(fixture.gateway.previewCommandBlock).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(previewButton).toHaveProperty("disabled", false),
+    );
+    fireEvent.click(previewButton);
+    await waitFor(() =>
+      expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledWith({
+        commandBlockId: commandSummaries[0].id,
+        expectedRevision: commandSummaries[0].revision,
+        parameterValues: { text: "pending current value" },
+      }),
+    );
+    expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("参数修改和改回原值都立即撤销旧 Preview 并丢弃迟到成功", async function invalidateLatePreviewSuccess() {
+    const firstPreview = createDeferred<PreviewCommandResponse>();
+    const secondPreview = createDeferred<PreviewCommandResponse>();
+    const thirdPreview = createDeferred<PreviewCommandResponse>();
+    /** 精确记录每次 Gateway 收到的独立结构化请求。 */
+    const requests: PreviewCommandRequest[] = [];
+    /** 按调用顺序返回三个受测试控制的 Preview。 */
+    const deferredPreviews = [firstPreview, secondPreview, thirdPreview];
+    const fixture = createCommandGatewayFixture({
+      previewCommandBlock: vi.fn(async function previewInOrder(request) {
+        requests.push(request);
+        const deferred = deferredPreviews[requests.length - 1];
+        if (!deferred) {
+          throw new Error("测试只允许三次 Preview");
+        }
+        return deferred.promise;
+      }),
+    });
+    render(
+      <CommandWorkspace
+        gateway={null}
+        commandGateway={fixture.gateway}
+        folderPicker={null}
+      />,
+    );
+    const input = await screen.findByRole("textbox", { name: /文本/ });
+
+    await clickAvailablePreview();
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0].parameterValues).toEqual({ text: "PowerShell 默认" });
+    fireEvent.change(input, { target: { value: "新的值" } });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "生成 Preview" })).toHaveProperty(
+        "disabled",
+        false,
+      ),
+    );
+    await clickAvailablePreview();
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[1].parameterValues).toEqual({ text: "新的值" });
+    await act(async () =>
+      secondPreview.resolve(
+        createPreviewResponse(requests[1], {
+          previewText: "CURRENT_NEW_PREVIEW",
+          executionSpecHash: "2".repeat(64),
+        }),
+      ),
+    );
+    expect(await screen.findByText("CURRENT_NEW_PREVIEW")).toBeDefined();
+    await act(async () =>
+      firstPreview.resolve(
+        createPreviewResponse(requests[0], {
+          previewText: "FIRST_LATE_PREVIEW",
+          executionSpecHash: "1".repeat(64),
+        }),
+      ),
+    );
+    expect(screen.queryByText("FIRST_LATE_PREVIEW")).toBeNull();
+    expect(screen.getByText("CURRENT_NEW_PREVIEW")).toBeDefined();
+
+    fireEvent.change(input, { target: { value: "PowerShell 默认" } });
+    expect(screen.queryByText("CURRENT_NEW_PREVIEW")).toBeNull();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "生成 Preview" })).toHaveProperty(
+        "disabled",
+        false,
+      ),
+    );
+    await clickAvailablePreview();
+    await waitFor(() => expect(requests).toHaveLength(3));
+    await act(async () =>
+      thirdPreview.resolve(
+        createPreviewResponse(requests[2], {
+          previewText: "CURRENT_PREVIEW",
+          executionSpecHash: "3".repeat(64),
+        }),
+      ),
+    );
+    expect(await screen.findByText("CURRENT_PREVIEW")).toBeDefined();
+    expect(screen.getByText("3".repeat(64))).toBeDefined();
+    expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("A→B→相同 A 后丢弃第一次 A 的迟到 Preview 错误", async function discardRepeatedIdentityPreviewError() {
+    const firstPreview = createDeferred<PreviewCommandResponse>();
+    /** 第一次 A 挂起，后续请求直接返回当前身份的安全 Preview。 */
+    let previewCall = 0;
+    const fixture = createCommandGatewayFixture({
+      previewCommandBlock: vi.fn(async function previewRepeatedIdentity(request) {
+        previewCall += 1;
+        if (previewCall === 1) {
+          return firstPreview.promise;
+        }
+        return createPreviewResponse(request, { previewText: "CURRENT_A" });
+      }),
+    });
+    render(
+      <CommandWorkspace
+        gateway={null}
+        commandGateway={fixture.gateway}
+        folderPicker={null}
+      />,
+    );
+    await screen.findByDisplayValue("PowerShell 默认");
+    await clickAvailablePreview();
+    await waitFor(() =>
+      expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledTimes(1),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /CMD 参数回显/ }));
+    await screen.findByDisplayValue("CMD 默认");
+    fireEvent.click(screen.getByRole("button", { name: /PowerShell 参数回显/ }));
+    await screen.findByDisplayValue("PowerShell 默认");
+    await act(async () =>
+      firstPreview.reject({
+        code: "VALIDATION_FAILED",
+        message: "不应显示的旧错误",
+        parameterKey: "text",
+      }),
+    );
+    expect(screen.queryByText("请求参数未通过校验")).toBeNull();
+    expect(screen.queryByText("不应显示的旧错误")).toBeNull();
+
+    await clickAvailablePreview();
+    expect(await screen.findByText("CURRENT_A")).toBeDefined();
+    expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("只把当前已声明 key 的 Rust 错误映射到字段并在修改前同步清除", async function renderAndClearCurrentFieldError() {
+    /** 第一次返回当前字段错误，第二次返回未知 key 的全局错误。 */
+    let previewCall = 0;
+    const fixture = createCommandGatewayFixture({
+      previewCommandBlock: vi.fn(async function rejectPreviewParameters() {
+        previewCall += 1;
+        throw {
+          code: "VALIDATION_FAILED",
+          message: "后端原始文案不得显示",
+          parameterKey: previewCall === 1 ? "text" : "unknown",
+        };
+      }),
+    });
+    render(
+      <CommandWorkspace
+        gateway={null}
+        commandGateway={fixture.gateway}
+        folderPicker={null}
+      />,
+    );
+    const input = await screen.findByRole("textbox", { name: /文本/ });
+
+    await clickAvailablePreview();
+    const fieldError = await screen.findByText("请求参数未通过校验");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-describedby")?.split(" ")).toContain(
+      fieldError.id,
+    );
+    expect(screen.queryByText("后端原始文案不得显示")).toBeNull();
+
+    fireEvent.change(input, { target: { value: "修正后的值" } });
+    expect(screen.queryByText("请求参数未通过校验")).toBeNull();
+    await waitFor(() => expect(input.getAttribute("aria-invalid")).toBe("false"));
+    await clickAvailablePreview();
+    const globalError = await screen.findByText("VALIDATION_FAILED");
+    expect(globalError.closest(".execution-error")).not.toBeNull();
+    expect(input.getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it.each([
+    ["REVISION_CONFLICT", "REVISION_CONFLICT"],
+    ["STALE_PREVIEW", "STALE_PREVIEW"],
+    ["UNSUPPORTED_RUNNER", "UNSUPPORTED_RUNNER"],
+    ["NOT_PUBLISHED", "IPC_FAILED"],
+  ] as const)(
+    "把带当前 key 的 %s 仍作为工作区错误 %s",
+    async function keepNonValidationErrorsGlobal(rejectedCode, visibleCode) {
+      const fixture = createCommandGatewayFixture({
+        previewCommandBlock: vi.fn(async function rejectNonValidationError() {
+          throw {
+            code: rejectedCode,
+            message: "不得显示的原始错误",
+            parameterKey: "text",
+          };
+        }),
+      });
+      render(
+        <CommandWorkspace
+          gateway={null}
+          commandGateway={fixture.gateway}
+          folderPicker={null}
+        />,
+      );
+      const input = await screen.findByRole("textbox", { name: /文本/ });
+
+      await clickAvailablePreview();
+      const globalError = await screen.findByText(visibleCode);
+
+      expect(globalError.closest(".execution-error")).not.toBeNull();
+      expect(input.getAttribute("aria-invalid")).toBe("false");
+      expect(screen.queryByText("不得显示的原始错误")).toBeNull();
+    },
+  );
+
+  it("把 Preview 响应的错误 ID 与 revision 收敛为安全 IPC 失败", async function rejectPreviewIdentityMismatch() {
+    /** 第一次篡改 ID，第二次篡改 revision。 */
+    let previewCall = 0;
+    const fixture = createCommandGatewayFixture({
+      previewCommandBlock: vi.fn(async function returnMismatchedPreview(request) {
+        previewCall += 1;
+        return createPreviewResponse(
+          request,
+          previewCall === 1
+            ? { commandBlockId: "builtin.other" }
+            : { revision: request.expectedRevision + 1 },
+        );
+      }),
+    });
+    render(
+      <CommandWorkspace
+        gateway={null}
+        commandGateway={fixture.gateway}
+        folderPicker={null}
+      />,
+    );
+    await screen.findByRole("textbox", { name: /文本/ });
+
+    await clickAvailablePreview();
+    expect(await screen.findByText("IPC_FAILED")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "执行当前命令" })).toBeNull();
+    await clickAvailablePreview("重试 Preview");
+    await waitFor(() =>
+      expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledTimes(2),
+    );
+    expect(screen.getByText("IPC_FAILED")).toBeDefined();
+    expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("基础 UX 校验未通过时不允许请求 Rust Preview", async function blockInvalidParameterSnapshot() {
+    const requiredDetails = createCommandDetails(commandSummaries[0], "");
+    requiredDetails.parameters[0] = {
+      type: "text",
+      key: "text",
+      label: "文本",
+      description: "当前 Definition 的文本参数",
+      required: true,
+      remember: false,
+      defaultValue: null,
+      minLength: 1,
+      maxLength: 32,
+      placeholder: "输入文本",
+    };
+    const fixture = createCommandGatewayFixture({
+      summaries: [commandSummaries[0]],
+      details: new Map([[commandSummaries[0].id, requiredDetails]]),
+    });
+    render(
+      <CommandWorkspace
+        gateway={null}
+        commandGateway={fixture.gateway}
+        folderPicker={null}
+      />,
+    );
+    const input = await screen.findByRole("textbox", { name: /文本/ });
+    const previewButton = screen.getByRole("button", { name: "生成 Preview" });
+    await waitFor(() => expect(previewButton).toHaveProperty("disabled", true));
+    expect(fixture.gateway.previewCommandBlock).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: "有效值" } });
+    await waitFor(() => expect(previewButton).toHaveProperty("disabled", false));
+    expect(fixture.gateway.previewCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("展示 passed Safety 并只使用 Rust actionLabel 形成 Ready 动作", async function renderPassedSafety() {
+    const fixture = createCommandGatewayFixture({
+      previewCommandBlock: vi.fn(async function returnPassedSafety(request) {
+        return createPreviewResponse(request, {
+          riskLevel: "destructive",
+          actionLabel: "执行 Rust 已确认动作",
+          safety: {
+            state: "passed",
+            summary: "Rust Safety 校验通过",
+            warnings: [],
+          },
+        });
+      }),
+    });
+    render(
+      <CommandWorkspace
+        gateway={null}
+        commandGateway={fixture.gateway}
+        folderPicker={null}
+      />,
+    );
+
+    await clickAvailablePreview();
+    const safety = await screen.findByRole("region", {
+      name: "Safety Decision",
+    });
+    expect(safety.textContent).toContain("passed");
+    expect(safety.textContent).toContain("Rust Safety 校验通过");
+    expect(
+      screen.getByRole("button", { name: "执行 Rust 已确认动作" }),
+    ).toHaveProperty("disabled", true);
+    expect(screen.getByText("Preview 已确认")).toBeDefined();
+    expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("以纯文本显示 warning、摘要、URL、HTML、ANSI/OSC 与截断证据", async function renderUntrustedPreviewText() {
+    /** 覆盖所有 Preview 文本字段的不可信字符矩阵。 */
+    const previewText =
+      "<b>Preview HTML</b> https://evil.invalid/path \u001b[31mRED\u001b[0m \u001b]8;;https://osc.invalid\u0007OSC\u001b]8;;\u0007";
+    /** Rust 返回的完整 Execution Spec Hash。 */
+    const fullHash = "9".repeat(64);
+    const fixture = createCommandGatewayFixture({
+      previewCommandBlock: vi.fn(async function returnWarningText(request) {
+        return createPreviewResponse(request, {
+          parameterSummaries: [
+            {
+              parameterKey: "text",
+              label: "<img src=x onerror=alert(1)>",
+              displayValues: [
+                "https://summary.invalid/path",
+                "\u001b[32mSUMMARY\u001b[0m",
+              ],
+              totalCount: 9,
+              truncated: true,
+            },
+            {
+              parameterKey: "second",
+              label: "第二项",
+              displayValues: ["保持 Rust 次序"],
+              totalCount: 1,
+              truncated: false,
+            },
+          ],
+          previewText,
+          fullSizeBytes: 4096,
+          truncated: true,
+          riskLevel: "destructive",
+          actionLabel: "<strong>Rust 动作</strong>",
+          safety: {
+            state: "warning",
+            summary: "<script>Safety summary</script>",
+            warnings: [
+              {
+                code: "WARN_HTML",
+                message:
+                  "https://warning.invalid \u001b]8;;https://warning.invalid\u0007link\u001b]8;;\u0007",
+              },
+            ],
+          },
+          executionSpecHash: fullHash,
+        });
+      }),
+    });
+    render(
+      <CommandWorkspace
+        gateway={null}
+        commandGateway={fixture.gateway}
+        folderPicker={null}
+      />,
+    );
+
+    await clickAvailablePreview();
+    const preview = await screen.findByLabelText("Rust 生成的 Preview 文本");
+    expect(preview.textContent).toBe(previewText);
+    expect(preview.querySelector("*")).toBeNull();
+    expect(
+      Array.from(
+        screen
+          .getByLabelText("Rust 规范化参数摘要")
+          .querySelectorAll("dt"),
+      ).map((term) => term.textContent),
+    ).toEqual(["<img src=x onerror=alert(1)>", "第二项"]);
+    expect(screen.getByText("<img src=x onerror=alert(1)>")).toBeDefined();
+    expect(screen.getByText("https://summary.invalid/path")).toBeDefined();
+    expect(screen.getByText("保持 Rust 次序")).toBeDefined();
+    expect(screen.getByText("9 项 · 摘要已截断")).toBeDefined();
+    expect(screen.getByText("4096 bytes")).toBeDefined();
+    expect(screen.getByText(fullHash)).toBeDefined();
+    expect(
+      screen.getByText(
+        "当前可见 Preview 文本已截断；完整大小与 Hash 仍对应 Rust Core 的完整 Artifact。",
+      ),
+    ).toBeDefined();
+    const safety = screen.getByRole("region", { name: "Safety Decision" });
+    expect(safety.textContent).toContain("warning");
+    expect(safety.textContent).toContain("<script>Safety summary</script>");
+    expect(safety.textContent).toContain("https://warning.invalid");
+    expect(safety.querySelector("script, a, img")).toBeNull();
+    const action = screen.getByRole("button", {
+      name: "<strong>Rust 动作</strong>",
+    });
+    expect(action.querySelector("strong")).toBeNull();
+    expect(
+      document.querySelector('a[href="https://evil.invalid/path"]'),
+    ).toBeNull();
+    expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("blocked Safety 只保留展示证据且不创建可执行动作", async function renderBlockedSafety() {
+    const fixture = createCommandGatewayFixture({
+      previewCommandBlock: vi.fn(async function returnBlockedSafety(request) {
+        return createPreviewResponse(request, {
+          riskLevel: "destructive",
+          actionLabel: "不得出现的执行动作",
+          safety: {
+            state: "blocked",
+            summary: "Rust 已拦截当前内容",
+            warnings: [
+              { code: "BLOCKED_TARGET", message: "请修改当前参数" },
+            ],
+          },
+        });
+      }),
+    });
+    render(
+      <CommandWorkspace
+        gateway={null}
+        commandGateway={fixture.gateway}
+        folderPicker={null}
+      />,
+    );
+
+    await clickAvailablePreview();
+    const safety = await screen.findByRole("region", {
+      name: "Safety Decision",
+    });
+    expect(safety.textContent).toContain("blocked");
+    expect(safety.textContent).toContain("Rust 已拦截当前内容");
+    expect(safety.textContent).toContain("BLOCKED_TARGET");
+    expect(screen.getByText("Preview 已拦截")).toBeDefined();
+    expect(
+      screen.queryByRole("button", { name: "不得出现的执行动作" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "重试 Preview" })).toBeDefined();
+    expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("Parameterless 在 Strict Mode 中每个 Definition generation 自动 Preview 一次并拒绝重复手动请求", async function autoPreviewParameterlessOnce() {
+    const parameterlessSummary: CommandBlockSummary = {
+      ...commandSummaries[0],
+      id: "builtin.parameterless.strict",
+      name: "无参数严格预览",
+    };
+    const parameterlessDetails: CommandBlockDetails = {
+      ...parameterlessSummary,
+      parameters: [],
+    };
+    const pendingPreview = createDeferred<PreviewCommandResponse>();
+    const fixture = createCommandGatewayFixture({
+      summaries: [parameterlessSummary],
+      details: new Map([[parameterlessSummary.id, parameterlessDetails]]),
+      previewCommandBlock: vi.fn(async function holdParameterlessPreview() {
+        return pendingPreview.promise;
+      }),
+    });
+    const rendered = render(
+      <StrictMode>
+        <CommandWorkspace
+          gateway={null}
+          commandGateway={fixture.gateway}
+          folderPicker={null}
+        />
+      </StrictMode>,
+    );
+
+    await waitFor(() =>
+      expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledOnce(),
+    );
+    expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledWith({
+      commandBlockId: parameterlessSummary.id,
+      expectedRevision: parameterlessSummary.revision,
+      parameterValues: {},
+    });
+    expect(screen.queryByRole("form", { name: "类型化参数" })).toBeNull();
+    /** 模拟旧按钮事件绕过 disabled；同步 active-request guard 仍必须阻止重复调用。 */
+    const pendingButton = screen.getByRole("button", {
+      name: "正在生成 Preview",
+    });
+    pendingButton.removeAttribute("disabled");
+    fireEvent.click(pendingButton);
+    expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledOnce();
+    expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+
+    rendered.unmount();
+    await act(async () =>
+      pendingPreview.resolve(
+        createPreviewResponse({
+          commandBlockId: parameterlessSummary.id,
+          expectedRevision: parameterlessSummary.revision,
+          parameterValues: {},
+        }),
+      ),
+    );
+    expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("Parameterless 自动 Preview 失败后只允许手动重试且永不自动 Run", async function retryFailedParameterlessPreview() {
+    const parameterlessSummary: CommandBlockSummary = {
+      ...commandSummaries[0],
+      id: "builtin.parameterless.retry",
+      name: "无参数重试",
+    };
+    const parameterlessDetails: CommandBlockDetails = {
+      ...parameterlessSummary,
+      parameters: [],
+    };
+    /** 第一次自动请求失败，第二次手动请求成功。 */
+    let previewCall = 0;
+    const fixture = createCommandGatewayFixture({
+      summaries: [parameterlessSummary],
+      details: new Map([[parameterlessSummary.id, parameterlessDetails]]),
+      previewCommandBlock: vi.fn(async function retryParameterless(request) {
+        previewCall += 1;
+        if (previewCall === 1) {
+          throw { code: "STALE_PREVIEW", message: "旧 Preview" };
+        }
+        return createPreviewResponse(request, {
+          previewText: "PARAMETERLESS_CURRENT",
+        });
+      }),
+    });
+    render(
+      <CommandWorkspace
+        gateway={null}
+        commandGateway={fixture.gateway}
+        folderPicker={null}
+      />,
+    );
+
+    expect(await screen.findByText("STALE_PREVIEW")).toBeDefined();
+    expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledOnce();
+    await act(async () => Promise.resolve());
+    expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledOnce();
+    await clickAvailablePreview("重试 Preview");
+    expect(await screen.findByText("PARAMETERLESS_CURRENT")).toBeDefined();
+    expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledTimes(2);
+    expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("Parameterless A→B→相同 A 为每个 Definition generation 各自动 Preview 一次", async function autoPreviewEveryParameterlessGeneration() {
+    const summaries = commandSummaries.map((summary) => ({
+      ...summary,
+      name: `${summary.name} 无参数`,
+    }));
+    const details = new Map(
+      summaries.map((summary) => [
+        summary.id,
+        { ...summary, parameters: [] } satisfies CommandBlockDetails,
+      ]),
+    );
+    const fixture = createCommandGatewayFixture({ summaries, details });
+    render(
+      <CommandWorkspace
+        gateway={null}
+        commandGateway={fixture.gateway}
+        folderPicker={null}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledTimes(1),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /CMD 参数回显 无参数/ }),
+    );
+    await waitFor(() =>
+      expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledTimes(2),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /PowerShell 参数回显 无参数/ }),
+    );
+    await waitFor(() =>
+      expect(fixture.gateway.previewCommandBlock).toHaveBeenCalledTimes(3),
+    );
+    expect(
+      vi.mocked(fixture.gateway.previewCommandBlock).mock.calls.map(
+        ([request]) => request,
+      ),
+    ).toEqual([
+      {
+        commandBlockId: summaries[0].id,
+        expectedRevision: summaries[0].revision,
+        parameterValues: {},
+      },
+      {
+        commandBlockId: summaries[1].id,
+        expectedRevision: summaries[1].revision,
+        parameterValues: {},
+      },
+      {
+        commandBlockId: summaries[0].id,
+        expectedRevision: summaries[0].revision,
+        parameterValues: {},
+      },
+    ]);
+    expect(fixture.gateway.runCommandBlock).not.toHaveBeenCalled();
+  });
+
+  it("通用桌面 Gateway 已连接但固定 Execution 未接线时只开放 Preview", async function showPendingRunWiring() {
     renderConnectedWorkspace();
     await screen.findByRole("heading", { name: "PowerShell 参数回显", level: 1 });
 
     expect(screen.queryByText("需要桌面宿主")).toBeNull();
     expect(screen.queryByText(/纯浏览器环境/)).toBeNull();
     expect(screen.getAllByText("Run 尚未接线").length).toBeGreaterThan(0);
-    const runButton = screen.getByRole("button", { name: "运行尚未接线" });
-    expect((runButton as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect(screen.getByRole("button", { name: "生成 Preview" })).toHaveProperty("disabled", false));
+    expect(screen.queryByRole("button", { name: "运行尚未接线" })).toBeNull();
     expect(screen.queryByRole("button", { name: "运行验收任务" })).toBeNull();
   });
 

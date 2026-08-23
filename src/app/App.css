@@ -878,6 +878,88 @@ button {
   white-space: pre;
 }
 
+.trusted-preview {
+  display: grid;
+  gap: 14px;
+}
+
+.preview-parameters,
+.preview-proof {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  border: 1px dashed var(--rule);
+}
+
+.preview-parameters > div,
+.preview-proof > div {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.34fr) minmax(0, 1fr);
+  gap: 14px;
+  padding: 10px 12px;
+}
+
+.preview-parameters > div + div,
+.preview-proof > div + div {
+  border-top: 1px dashed var(--rule);
+}
+
+.preview-parameters dt,
+.preview-parameters dd,
+.preview-proof dt,
+.preview-proof dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.preview-parameters dt,
+.preview-proof dt {
+  color: var(--ink-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.preview-parameters dd,
+.preview-proof dd {
+  color: var(--ink);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.preview-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+}
+
+.preview-values code,
+.preview-proof code {
+  color: var(--signal-strong);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.preview-parameters small {
+  display: block;
+  margin-top: 6px;
+  color: var(--ink-muted);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.preview-truncation {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 2px solid var(--signal-interesting);
+  background: rgba(168, 77, 42, 0.06);
+  color: var(--signal-interesting);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .preview-code {
   display: grid;
   min-width: max-content;
@@ -1086,6 +1168,54 @@ button {
 }
 
 .safety-state--stale {
+  color: var(--signal-interesting);
+}
+
+.safety-summary {
+  margin: 13px 0 0;
+  color: var(--ink-muted);
+  font-family: var(--serif);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.safety-warnings {
+  display: grid;
+  gap: 0;
+  margin: 14px 0 0;
+  padding: 0;
+  border: 1px dashed var(--rule);
+  list-style: none;
+}
+
+.safety-warnings li {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+}
+
+.safety-warnings li + li {
+  border-top: 1px dashed var(--rule);
+}
+
+.safety-warnings code {
+  color: var(--signal-interesting);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.safety-warnings span {
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.safety-decision--passed .safety-state,
+.safety-decision--warning .safety-state {
+  color: var(--signal-strong);
+}
+
+.safety-decision--blocked .safety-state {
   color: var(--signal-interesting);
 }
 

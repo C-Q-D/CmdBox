@@ -241,18 +241,19 @@ CMD02-TEMPLATE-01┘                                      │
 
 ## CMD02-UI-PREVIEW-01 呈现 Rust Preview 与失效状态
 
-- 状态：in_progress
+- 状态：done
 - 支持的验收场景：用户生成并检查当前参数对应的规范化 Preview，参数或命令变化后旧 Preview 立即不可执行。
 - 唯一目标：完成 Command Workspace 的 configuring → previewing → ready 流程。
 - 当前行为与目标行为：表单已有结构化值但没有 Preview；完成后只显示 Rust 返回的摘要、文本、大小、截断、安全和 Hash 状态。
 - 前置条件与依赖：`CMD02-UI-FORM-01`。
-- 代码定位依据：`CommandWorkspace.tsx`、Preview 样式、`App.test.tsx`。
-- 允许修改：Preview 状态、展示、动作和测试。
+- 代码定位依据：`CommandWorkspace.tsx`、`ParameterForm.tsx`、对应测试与 Preview 样式。
+- 允许修改：Preview 状态、展示、动作和测试，以及 Parameter Form 接收当前 Rust 字段错误所需的最小可访问接口。
 - 明确不修改：Execution Channel、Cancel、Outcome 或前端 Shell 处理。
-- 实现步骤：Preview 请求携带 ID/revision/完整 Values；每次修改/切换递增 generation 并清除 ConfirmedPreview；只接受当前 ID/revision/generation 响应；保存不可变参数快照与完整 Hash；展示规范化 Summary、Preview Text、完整大小和截断；normal/notApplicable 省略危险区；blocked 不进入 ready。
-- 接口、数据与错误契约：前端不计算 Hash、不使用展示文本授权 Run、不用原始路径伪造规范化摘要；Preview 文本永远以 `<pre>` 文本呈现。
-- 边界与异常：迟到响应丢弃；字段错误定位对应参数；Stale/Revision 错误回 configuring；无参数 Block 自动 Preview 但仍需用户明确 Run。
-- 测试要求：成功、字段错误、blocked、truncated、参数失效、切换失效、乱序响应、HTML/ANSI/URL 纯文本和完整 Hash 快照。
+- 实现步骤：Preview 使用与 Execution 正交的 configuring → previewing → ready 状态；请求只携带当前 Definition 的 ID/revision 和完整 Values。任一真实参数写入前，Parameter Form 先调用 Workspace 的同步交互回调；该回调递增 configuration generation、清除 Preview/授权与外部字段错误、同步把 snapshot ref/state 标记为 pending，并返回新 generation。Parameter Form 把返回值写入自身 render state，再由该次 render 的 effect 发送带同一 generation 的新快照，effect 不得在执行时读取最新可变 ref；即使 Picker 返回与当前值相同也必须因 generation state 变化产生新快照。命令/Definition 切换另有独立 generation。每次请求分配单调 token，并冻结请求时 Definition generation、configuration generation 与深复制只读参数快照；响应只有在组件仍挂载、token/generation/ID/revision 全部匹配且返回身份一致时才落地。
+- 接口、数据与错误契约：表单交付 `ParameterFormSnapshot { values, isValid, configurationGeneration }`；Definition 初始挂载显式接收当前 generation，Workspace 的 Preview handler 只读 snapshot ref，并且只有快照 generation 等于当前 configuration generation 时才能请求。`ConfirmedPreview` 原子保存 Command Block ID、revision、深复制只读参数快照、深复制只读 `PreviewCommandResponse`、完整 Hash、Definition generation 和 configuration generation；发给 Gateway 的请求使用另一份深复制值，不能与 ConfirmedPreview 共享可变数组或对象。后续 Run 不得重新读取可变表单值，也不得从展示文本或 DOM 重建请求。前端不计算 Hash、不使用展示文本授权 Run、不用原始路径伪造规范化摘要；参数摘要严格按 Rust 顺序显示 `displayValues/totalCount/truncated`。`previewText`、参数摘要 label/value、Safety summary/warning 和 `actionLabel` 都只通过 React 文本节点呈现，不解析 HTML/Markdown、ANSI/OSC 或 URL；`truncated=true` 时明确说明可见文本被截断，而大小和 Hash 对应完整 Artifact。
+- 边界与异常：参数修改、改回原值、连续多次修改、命令切换、Definition 变化、旧请求 resolve/reject 和卸载都不得复活旧授权或组合“新 generation + 旧 values”；A → B → 相同 ID/revision A 仍以 generation/token 丢弃第一次 A。当前请求若返回错误 ID/revision，必须结束 previewing 并收敛为安全 IPC 错误。Rust 字段错误建模为 `ExternalFieldError { definitionGeneration, configurationGeneration, parameterKey, message }`：只有当前 token、双 generation、ID/revision 和当前 Parameter key 全部匹配时才传给 Parameter Form；外部错误与 RHF 本地错误共同驱动稳定错误 ID、`aria-invalid` 和 `aria-describedby`，但不改写 RHF validity；任一真实参数写入前同步清除。未知 key 与 Revision/Stale/Runner/IPC 错误显示为工作区错误。Safety 矩阵固定为：仅 `normal + notApplicable` 省略安全区；`passed` 展示通过结论并进入 ready；`warning` 展示 summary/warnings 并进入 ready；`blocked` 展示 summary/warnings、不创建 `ConfirmedPreview` 且不显示可执行动作。Ready 的禁用动作文字只取响应 `actionLabel`。本原子不得调用 `runCommandBlock`、创建 Channel 或把 ready/blocked 接到旧 `startFixedExecution` 测试接缝。
+- Parameterless 契约：Definition 无参数时省略整个参数区域，由 Workspace 建立绑定当前双 generation 的 `{ values: {}, isValid: true }` 快照；每个 Definition generation 自动 Preview 恰好一次，在 React Strict Mode 和 A→B→A 下也不得重复。失败后停止自动重试并提供手动 Preview，永不自动 Run。
+- 测试要求：基础校验与 pending snapshot 门禁、连续两次修改在 effect 交付前发生、Picker 返回同值、精确 Preview 请求、请求与 ConfirmedPreview 深复制隔离、成功 Ready、参数摘要顺序/数量/截断、完整大小和 Hash、全部响应文本字段中的 HTML/ANSI/OSC/URL 惰性显示、Safety notApplicable/passed/warning/blocked 完整矩阵与 Rust `actionLabel`、当前字段错误/未知 key/修改清错/A→B→A 迟到错误、响应身份不符、参数修改与改回原值失效、命令切换失效、pending 修改、乱序响应、迟到错误、卸载、Parameterless 在 Strict Mode 下每 Definition generation 恰好一次且失败可手动重试、浏览器降级，以及 Preview 全流程对通用 Run/Channel/旧固定执行均为零调用；既有固定 Execution 回归继续通过。
 - 验证命令：相关 Vitest、typecheck、Vite build。
 - 预期结果：只有当前 Rust Preview 能启用后端动作文案。
 - 完成判定：无法通过参数竞态、旧响应或截断文本运行旧内容。
@@ -262,9 +263,15 @@ CMD02-TEMPLATE-01┘                                      │
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(ui): [CMD02-UI-PREVIEW-01] 呈现可信 Preview`
 
+### 执行记录
+
+- 实际验证：Preview、Parameter Form 与不可变快照定向测试 56 项通过；完整前端测试 7 个文件、76 项全部通过；两套 TypeScript 配置检查和 Vite production build（158 个模块）通过；`git diff --check` 通过。
+- 交付事实：Command Workspace 只从当前双 generation 参数快照请求 Rust Preview，并以单调 token、Definition 身份和组件存活门禁拒绝迟到结果；请求、`ConfirmedPreview` 参数和响应分别递归复制冻结。Safety 四态、字段错误、截断证据、Rust `actionLabel` 和 Parameterless 自动 Preview 均已接线，全部不可信文本只以 React 文本节点呈现。
+- 安全与复核：同步单飞门禁阻止同一提交内重复 Preview；只有当前 `VALIDATION_FAILED` 的已声明 key 能进入字段错误，其他错误保留为工作区错误。本原子没有调用通用 Run、创建 Execution Channel、启动 GUI/Tauri 或执行真实 PowerShell/CMD；L2 隔离复核结论为 `PASS`。
+
 ## CMD02-UI-RUN-01 完成类型化命令宿主闭环
 
-- 状态：pending
+- 状态：in_progress
 - 支持的验收场景：用户从当前 Confirmed Preview 运行 PowerShell/CMD，观察字面参数输出、自然结束或取消，并得到稳定反馈。
 - 唯一目标：把 ready Preview 接到既有 Execution Stream 并取得完整真实宿主证据。
 - 当前行为与目标行为：已有表单和 Preview；完成后 Run/Output/Cancel/终态形成完整 CMD-02 产品闭环。

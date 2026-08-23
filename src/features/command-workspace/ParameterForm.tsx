@@ -24,10 +24,30 @@ export interface ParameterFormProps {
   definition: CommandBlockDetails;
   /** Execution 活跃时锁定全部字段、选择器和移除动作。 */
   disabled: boolean;
+  /** 当前 Definition 请求的独立 generation，用于拒绝跨定义字段错误。 */
+  definitionGeneration: number;
+  /** 当前 Definition 初始绑定的配置 generation。 */
+  configurationGeneration: number;
+  /** 当前 Rust Preview 返回且仍匹配双 generation 的字段错误。 */
+  externalFieldError: ExternalFieldError | null;
   /** 原生目录选择 Adapter；纯浏览器环境为 `null`。 */
   folderPicker: FolderPicker | null;
+  /** 在任一真实字段写入前同步使旧 Preview 失效，并返回新的 generation。 */
+  onConfigurationChange(): number;
   /** 每次 wire 记录或 UX 有效性变化时返回新的防御性快照。 */
   onStateChange(state: ParameterFormSnapshot): void;
+}
+
+/** Rust 字段错误绑定到当前 Definition 与配置快照的最小可访问模型。 */
+export interface ExternalFieldError {
+  /** 错误所属的 Definition 请求 generation。 */
+  definitionGeneration: number;
+  /** 错误所属的用户配置 generation。 */
+  configurationGeneration: number;
+  /** 对应当前 Parameter Definition 的稳定 key。 */
+  parameterKey: string;
+  /** Gateway 已收敛且可安全显示的错误说明。 */
+  message: string;
 }
 
 /** 下一个 Preview 原子可稳定消费的表单快照。 */
@@ -36,6 +56,8 @@ export interface ParameterFormSnapshot {
   values: Record<string, ParameterValue>;
   /** 只表示当前 Definition 的即时 UX 约束是否通过。 */
   isValid: boolean;
+  /** 生成此快照的真实配置 generation。 */
+  configurationGeneration: number;
 }
 
 /** 从 Definition 的明确非 null 默认值创建 RHF 中间态。 */
@@ -262,7 +284,11 @@ function constraintLabel(parameter: ParameterDefinition): string {
 export function ParameterForm({
   definition,
   disabled,
+  definitionGeneration,
+  configurationGeneration,
+  externalFieldError,
   folderPicker,
+  onConfigurationChange,
   onStateChange,
 }: ParameterFormProps) {
   /** 只用于当前挂载实例的 DOM id 前缀。 */
@@ -274,7 +300,7 @@ export function ParameterForm({
   /** 始终指向最新 Execution lock，异步 Picker 不依赖旧 render 闭包。 */
   const disabledSnapshot = useRef(disabled);
   /** 当前 Definition 身份，异步结果必须与请求时完全一致。 */
-  const definitionIdentity = `${definition.id}:${definition.revision}`;
+  const definitionIdentity = `${definition.id}:${definition.revision}:${definitionGeneration}`;
   /** 当前 Definition 身份的最新快照。 */
   const definitionIdentitySnapshot = useRef(definitionIdentity);
   /** 单调 Picker token 与当前全表单唯一 pending 请求。 */
@@ -283,6 +309,10 @@ export function ParameterForm({
   const pickerRequestSequence = useRef(0);
   /** 用于禁用其他 Picker 入口并呈现等待状态的字段 key。 */
   const [pendingPickerKey, setPendingPickerKey] = useState<string | null>(null);
+  /** 当前 render 对应的配置 generation，保证 effect 不读取可变最新值。 */
+  const [snapshotGeneration, setSnapshotGeneration] = useState(
+    configurationGeneration,
+  );
   /** RHF 是当前表单交互状态的唯一所有者。 */
   const { clearErrors, control, formState, getValues, setError, setValue } = useForm<ParameterFormState>({
     defaultValues: createDefaultFormState(definition.parameters),
@@ -312,8 +342,21 @@ export function ParameterForm({
         touchedKeys.current,
       ),
       isValid: formState.isValid,
+      configurationGeneration: snapshotGeneration,
     });
-  }, [definition.parameters, formState.isValid, onStateChange, watchedValues]);
+  }, [
+    definition.parameters,
+    formState.isValid,
+    onStateChange,
+    snapshotGeneration,
+    watchedValues,
+  ]);
+
+  /** 在写入 RHF 前取得新 generation，使旧 Preview 与字段错误同步失效。 */
+  function beginConfigurationWrite(): void {
+    const nextGeneration = onConfigurationChange();
+    setSnapshotGeneration(nextGeneration);
+  }
 
   /** 判断一个异步 Picker 响应是否仍属于当前 Definition、字段、token 和 lock。 */
   function canAcceptPickerResult(
@@ -358,6 +401,7 @@ export function ParameterForm({
         return;
       }
       if (parameter.type === "folder") {
+        beginConfigurationWrite();
         touchedKeys.current.add(parameter.key);
         setValue(parameter.key, selected as string, {
           shouldDirty: true,
@@ -379,6 +423,7 @@ export function ParameterForm({
         });
         return;
       }
+      beginConfigurationWrite();
       touchedKeys.current.add(parameter.key);
       setValue(parameter.key, nextFolders, {
         shouldDirty: true,
@@ -409,6 +454,7 @@ export function ParameterForm({
     if (index < 0 || index >= currentFolders.length) {
       return;
     }
+    beginConfigurationWrite();
     touchedKeys.current.add(parameterKey);
     clearErrors(parameterKey);
     setValue(
@@ -456,41 +502,58 @@ export function ParameterForm({
                 },
               }}
               render={({ field, fieldState }) => {
+                /** 只接受同时匹配当前 Definition、配置 generation 与字段 key 的 Rust 错误。 */
+                const currentExternalError =
+                  externalFieldError?.definitionGeneration ===
+                    definitionGeneration &&
+                  externalFieldError.configurationGeneration ===
+                    snapshotGeneration &&
+                  externalFieldError.parameterKey === parameter.key
+                    ? externalFieldError.message
+                    : null;
+                /** 本地即时校验和 Rust 字段错误共享同一个稳定可访问错误节点。 */
+                const currentError = [
+                  fieldState.error?.message,
+                  currentExternalError,
+                ]
+                  .filter((message): message is string => Boolean(message))
+                  .join("；");
                 /** 只关联当前实际存在的说明、约束和错误节点。 */
                 const describedBy = [
                   parameter.description ? descriptionId : null,
                   constraintId,
-                  fieldState.error ? errorId : null,
+                  currentError ? errorId : null,
                 ]
                   .filter((id): id is string => id !== null)
                   .join(" ");
                 /** 标记本字段由用户触达，再把值交回 RHF。 */
                 function changeValue(value: boolean | string | string[]) {
+                  beginConfigurationWrite();
                   touchedKeys.current.add(parameter.key);
                   field.onChange(value);
                 }
                 let controlElement;
                 switch (parameter.type) {
                   case "text":
-                    controlElement = <input id={fieldId} type="text" value={field.value as string} placeholder={parameter.placeholder ?? undefined} aria-describedby={describedBy} aria-invalid={fieldState.invalid} disabled={disabled} onBlur={field.onBlur} onChange={(event) => changeValue(event.currentTarget.value)} />;
+                    controlElement = <input id={fieldId} type="text" value={field.value as string} placeholder={parameter.placeholder ?? undefined} aria-describedby={describedBy} aria-invalid={Boolean(currentError)} disabled={disabled} onBlur={field.onBlur} onChange={(event) => changeValue(event.currentTarget.value)} />;
                     break;
                   case "number":
-                    controlElement = <input id={fieldId} type="number" value={field.value as string} min={parameter.min ?? undefined} max={parameter.max ?? undefined} step={parameter.step ?? "any"} aria-describedby={describedBy} aria-invalid={fieldState.invalid} disabled={disabled} onBlur={field.onBlur} onChange={(event) => changeValue(event.currentTarget.value)} />;
+                    controlElement = <input id={fieldId} type="number" value={field.value as string} min={parameter.min ?? undefined} max={parameter.max ?? undefined} step={parameter.step ?? "any"} aria-describedby={describedBy} aria-invalid={Boolean(currentError)} disabled={disabled} onBlur={field.onBlur} onChange={(event) => changeValue(event.currentTarget.value)} />;
                     break;
                   case "boolean":
-                    controlElement = <input id={fieldId} type="checkbox" checked={field.value === true} aria-describedby={describedBy} aria-invalid={fieldState.invalid} disabled={disabled} onBlur={field.onBlur} onChange={(event) => changeValue(event.currentTarget.checked)} />;
+                    controlElement = <input id={fieldId} type="checkbox" checked={field.value === true} aria-describedby={describedBy} aria-invalid={Boolean(currentError)} disabled={disabled} onBlur={field.onBlur} onChange={(event) => changeValue(event.currentTarget.checked)} />;
                     break;
                   case "select":
-                    controlElement = <select id={fieldId} value={field.value as string} aria-describedby={describedBy} aria-invalid={fieldState.invalid} disabled={disabled} onBlur={field.onBlur} onChange={(event) => changeValue(event.currentTarget.value)}><option value="">请选择…</option>{parameter.options.map((option) => <option key={option} value={option}>{option}</option>)}</select>;
+                    controlElement = <select id={fieldId} value={field.value as string} aria-describedby={describedBy} aria-invalid={Boolean(currentError)} disabled={disabled} onBlur={field.onBlur} onChange={(event) => changeValue(event.currentTarget.value)}><option value="">请选择…</option>{parameter.options.map((option) => <option key={option} value={option}>{option}</option>)}</select>;
                     break;
                   case "folder":
-                    controlElement = <div className="parameter-picker parameter-picker--folder"><input id={fieldId} type="text" readOnly value={field.value as string} aria-describedby={describedBy} aria-invalid={fieldState.invalid} disabled={disabled} /><button type="button" disabled={disabled || !folderPicker || pendingPickerKey !== null} aria-label={`选择${parameter.label}`} onClick={() => void pickParameter(parameter)}>{pendingPickerKey === parameter.key ? "正在选择…" : "选择目录"}</button><button type="button" disabled={disabled || field.value === ""} aria-label={`清空${parameter.label}`} onClick={() => changeValue("")}>清空</button></div>;
+                    controlElement = <div className="parameter-picker parameter-picker--folder"><input id={fieldId} type="text" readOnly value={field.value as string} aria-describedby={describedBy} aria-invalid={Boolean(currentError)} disabled={disabled} /><button type="button" disabled={disabled || !folderPicker || pendingPickerKey !== null} aria-label={`选择${parameter.label}`} onClick={() => void pickParameter(parameter)}>{pendingPickerKey === parameter.key ? "正在选择…" : "选择目录"}</button><button type="button" disabled={disabled || field.value === ""} aria-label={`清空${parameter.label}`} onClick={() => changeValue("")}>清空</button></div>;
                     break;
                   case "folders":
-                    controlElement = <div className="parameter-picker parameter-picker--multiple"><button id={fieldId} type="button" disabled={disabled || !folderPicker || pendingPickerKey !== null} aria-describedby={describedBy} aria-invalid={fieldState.invalid} aria-label={`添加${parameter.label}`} onClick={() => void pickParameter(parameter)}>{pendingPickerKey === parameter.key ? "正在选择…" : "添加目录"}</button><ol className="parameter-folder-list" aria-label={`${parameter.label}已选值`}>{(field.value as string[]).map((folder, index) => <li key={`${index}-${folder}`}><code>{folder}</code><button type="button" disabled={disabled} aria-label={`移除${parameter.label}第 ${index + 1} 项`} onClick={() => removeFolder(parameter.key, index)}>移除</button></li>)}</ol></div>;
+                    controlElement = <div className="parameter-picker parameter-picker--multiple"><button id={fieldId} type="button" disabled={disabled || !folderPicker || pendingPickerKey !== null} aria-describedby={describedBy} aria-invalid={Boolean(currentError)} aria-label={`添加${parameter.label}`} onClick={() => void pickParameter(parameter)}>{pendingPickerKey === parameter.key ? "正在选择…" : "添加目录"}</button><ol className="parameter-folder-list" aria-label={`${parameter.label}已选值`}>{(field.value as string[]).map((folder, index) => <li key={`${index}-${folder}`}><code>{folder}</code><button type="button" disabled={disabled} aria-label={`移除${parameter.label}第 ${index + 1} 项`} onClick={() => removeFolder(parameter.key, index)}>移除</button></li>)}</ol></div>;
                     break;
                 }
-                return <>{controlElement}<p id={constraintId} className="parameter-field__constraints">{constraintLabel(parameter)}</p>{fieldState.error ? <p id={errorId} className="parameter-field__error" role="alert">{fieldState.error.message}</p> : null}</>;
+                return <>{controlElement}<p id={constraintId} className="parameter-field__constraints">{constraintLabel(parameter)}</p>{currentError ? <p id={errorId} className="parameter-field__error" role="alert">{currentError}</p> : null}</>;
               }}
             />
           </div>

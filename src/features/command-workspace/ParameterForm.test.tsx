@@ -5,6 +5,7 @@
  * 的内部状态；Rust 负责的路径、Shell 与最终参数校验不在这里复制。
  */
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   CommandBlockDetails,
@@ -12,7 +13,55 @@ import type {
   ParameterValue,
 } from "../../generated/contracts";
 import type { FolderPicker } from "./folder-picker";
-import { ParameterForm, type ParameterFormSnapshot } from "./ParameterForm";
+import {
+  ParameterForm as ProductionParameterForm,
+  type ParameterFormProps,
+  type ParameterFormSnapshot,
+} from "./ParameterForm";
+
+/** 既有表单行为测试使用的默认双 generation 外壳。 */
+type TestParameterFormProps = Omit<
+  ParameterFormProps,
+  | "definitionGeneration"
+  | "configurationGeneration"
+  | "externalFieldError"
+  | "onConfigurationChange"
+> &
+  Partial<
+    Pick<
+      ParameterFormProps,
+      | "definitionGeneration"
+      | "configurationGeneration"
+      | "externalFieldError"
+      | "onConfigurationChange"
+    >
+  >;
+
+/** 为每个测试表单提供独立的单调配置 generation。 */
+function ParameterForm({
+  definitionGeneration = 1,
+  configurationGeneration = 1,
+  externalFieldError = null,
+  onConfigurationChange,
+  ...props
+}: TestParameterFormProps) {
+  /** 当前测试表单的最新配置 generation。 */
+  const generation = useRef(configurationGeneration);
+  /** 默认在每次字段写入前递增 generation。 */
+  function advanceGeneration(): number {
+    generation.current += 1;
+    return generation.current;
+  }
+  return (
+    <ProductionParameterForm
+      {...props}
+      definitionGeneration={definitionGeneration}
+      configurationGeneration={configurationGeneration}
+      externalFieldError={externalFieldError}
+      onConfigurationChange={onConfigurationChange ?? advanceGeneration}
+    />
+  );
+}
 
 /** 每个测试后卸载表单，确保异步 Picker 的 mounted 检查彼此隔离。 */
 afterEach(function cleanupParameterForm() {
@@ -110,10 +159,20 @@ function createPicker(): FolderPicker {
   };
 }
 
-/** 取得最近一次表单回调的公开快照。 */
-function latestState(onStateChange: ReturnType<typeof vi.fn>): ParameterFormSnapshot {
+/** 取得最近一次包含 generation 的完整公开快照。 */
+function latestVersionedState(
+  onStateChange: ReturnType<typeof vi.fn>,
+): ParameterFormSnapshot {
   const calls = onStateChange.mock.calls;
   return calls[calls.length - 1]?.[0] as ParameterFormSnapshot;
+}
+
+/** 取得既有表单断言关注的值与 validity，不重复 generation 断言。 */
+function latestState(
+  onStateChange: ReturnType<typeof vi.fn>,
+): Omit<ParameterFormSnapshot, "configurationGeneration"> {
+  const { values, isValid } = latestVersionedState(onStateChange);
+  return { values, isValid };
 }
 
 /** 取得最近一次表单回调的结构化 wire 记录。 */
@@ -779,5 +838,186 @@ describe("ParameterForm", function describeParameterForm() {
     await act(async () => pendingFolder.resolve("C:\\locked-late"));
     expect(latestValues(onStateChange)).not.toHaveProperty("folder");
     expect((screen.getByRole("textbox", { name: /文本/ }) as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it("连续两次输入只发布各自 render 捕获的 generation 与对应值", async function preserveRenderGenerationPairs() {
+    const onStateChange = vi.fn();
+    const onConfigurationChange = vi
+      .fn<() => number>()
+      .mockReturnValueOnce(2)
+      .mockReturnValueOnce(3);
+    render(
+      <ParameterForm
+        definition={createDefinition()}
+        disabled={false}
+        configurationGeneration={1}
+        folderPicker={null}
+        onConfigurationChange={onConfigurationChange}
+        onStateChange={onStateChange}
+      />,
+    );
+    await waitFor(() =>
+      expect(latestVersionedState(onStateChange).configurationGeneration).toBe(
+        1,
+      ),
+    );
+    onStateChange.mockClear();
+
+    const textInput = screen.getByRole("textbox", {
+      name: /文本/,
+    }) as HTMLInputElement;
+    /** 原生 value setter 让两个 React input 事件共处同一 act 提交，effect 只能在其后运行。 */
+    const setNativeValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    if (!setNativeValue) {
+      throw new Error("测试环境缺少 HTMLInputElement.value setter");
+    }
+    act(() => {
+      setNativeValue.call(textInput, "A");
+      textInput.dispatchEvent(new Event("input", { bubbles: true }));
+      setNativeValue.call(textInput, "AB");
+      textInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    await waitFor(() => {
+      expect(latestVersionedState(onStateChange)).toMatchObject({
+        values: { text: "AB" },
+        configurationGeneration: 3,
+      });
+    });
+    expect(onConfigurationChange).toHaveBeenCalledTimes(2);
+    /** 即使 React 为离散输入分别提交 effect，也不能组合新 generation 与旧 values。 */
+    const deliveredSnapshots = onStateChange.mock.calls.map(
+      ([snapshot]) => snapshot as ParameterFormSnapshot,
+    );
+    expect(
+      deliveredSnapshots.some(
+        (snapshot) =>
+          snapshot.configurationGeneration === 2 &&
+          snapshot.values.text !== "A",
+      ),
+    ).toBe(false);
+    expect(
+      deliveredSnapshots.some(
+        (snapshot) =>
+          snapshot.configurationGeneration === 3 &&
+          snapshot.values.text !== "AB",
+      ),
+    ).toBe(false);
+  });
+
+  it("Picker 返回与当前值相同仍发布新的配置 generation", async function versionSamePickerValue() {
+    const definition = createDefinition({
+      parameters: [
+        {
+          type: "folder",
+          key: "folder",
+          label: "单个目录",
+          description: "验证同值选择仍撤销旧 Preview",
+          required: false,
+          remember: false,
+          mustExist: true,
+          defaultValue: "C:\\same",
+        },
+      ],
+    });
+    const onStateChange = vi.fn();
+    const onConfigurationChange = vi.fn<() => number>(() => 2);
+    render(
+      <ParameterForm
+        definition={definition}
+        disabled={false}
+        configurationGeneration={1}
+        folderPicker={{
+          pickFolder: vi.fn(async () => "C:\\same"),
+          pickFolders: vi.fn(async () => []),
+        }}
+        onConfigurationChange={onConfigurationChange}
+        onStateChange={onStateChange}
+      />,
+    );
+    await waitFor(() =>
+      expect(latestVersionedState(onStateChange)).toMatchObject({
+        values: { folder: "C:\\same" },
+        configurationGeneration: 1,
+      }),
+    );
+    onStateChange.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "选择单个目录" }));
+
+    await waitFor(() =>
+      expect(latestVersionedState(onStateChange)).toEqual({
+        values: { folder: "C:\\same" },
+        isValid: true,
+        configurationGeneration: 2,
+      }),
+    );
+    expect(onConfigurationChange).toHaveBeenCalledOnce();
+  });
+
+  it("只呈现匹配双 generation 的 Rust 字段错误且不改写 RHF validity", async function renderVersionedExternalError() {
+    const definition = createDefinition({
+      parameters: [
+        {
+          type: "text",
+          key: "text",
+          label: "文本",
+          description: "当前 Definition 的文本参数",
+          required: true,
+          remember: false,
+          defaultValue: "valid",
+          minLength: 1,
+          maxLength: 16,
+          placeholder: null,
+        },
+      ],
+    });
+    const onStateChange = vi.fn();
+    const rendered = render(
+      <ParameterForm
+        definition={definition}
+        disabled={false}
+        definitionGeneration={5}
+        configurationGeneration={7}
+        externalFieldError={{
+          definitionGeneration: 5,
+          configurationGeneration: 7,
+          parameterKey: "text",
+          message: "请求参数未通过校验",
+        }}
+        folderPicker={null}
+        onStateChange={onStateChange}
+      />,
+    );
+
+    const input = screen.getByRole("textbox", { name: /文本/ });
+    const externalError = await screen.findByText("请求参数未通过校验");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-describedby")?.split(" ")).toContain(
+      externalError.id,
+    );
+    await waitFor(() => expect(latestState(onStateChange).isValid).toBe(true));
+
+    rendered.rerender(
+      <ParameterForm
+        definition={definition}
+        disabled={false}
+        definitionGeneration={5}
+        configurationGeneration={7}
+        externalFieldError={{
+          definitionGeneration: 4,
+          configurationGeneration: 7,
+          parameterKey: "text",
+          message: "旧 Definition 错误",
+        }}
+        folderPicker={null}
+        onStateChange={onStateChange}
+      />,
+    );
+    expect(screen.queryByText("旧 Definition 错误")).toBeNull();
+    expect(input.getAttribute("aria-invalid")).toBe("false");
   });
 });
