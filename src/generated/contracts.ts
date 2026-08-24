@@ -462,9 +462,30 @@ actionLabel: string,
  */
 safety: PreviewSafetyDecision,
 /**
+ * high-risk Preview 需要的确认要求；普通和 normal Command 为空。
+ */
+confirmationRequirement?: PreviewConfirmationRequirement,
+/**
+ * destructive 目标身份列表的稳定凭据；normal Command 为空。
+ */
+targetIdentityHash?: string,
+/**
  * 覆盖完整 Canonical Execution Spec 的 64 字符 SHA-256。
  */
 executionSpecHash: string, };
+
+/**
+ * Rust Core 对 high-risk destructive 操作给出的版本化确认要求。
+ */
+export type PreviewConfirmationRequirement = {
+/**
+ * 进入 Execution Spec 的确认语义版本。
+ */
+version: number,
+/**
+ * 用户必须精确提交的固定短语。
+ */
+phrase: string, };
 
 /**
  * Rust Core 为一个 Parameter Definition 生成的有界规范化摘要。
@@ -544,6 +565,15 @@ executionId: string, };
  * 当前 Windows MVP 可由 Command Block 声明的 Runner。
  */
 export type RunnerType = "windowsPowerShell" | "cmd";
+
+/**
+ * high-risk destructive Run 的窄确认响应。
+ */
+export type SafetyConfirmationResponse = {
+/**
+ * 当前版本固定要求的确认短语。
+ */
+phrase: string, };
 
 /**
  * Select 参数的固定选项集合。
@@ -638,4 +668,12 @@ parameterValues: { [key in string]: ParameterValue },
 /**
  * Preview 返回且用户已经确认的完整 Execution Spec SHA-256。
  */
-executionSpecHash: string, };
+executionSpecHash: string,
+/**
+ * destructive high-risk Preview 要求的明确确认响应；normal Command 省略。
+ */
+safetyConfirmation?: SafetyConfirmationResponse,
+/**
+ * Preview 返回的目标身份凭据；用于在完整 Hash 比较前识别目标被替换。
+ */
+targetIdentityHash?: string, };

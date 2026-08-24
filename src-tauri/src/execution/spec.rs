@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use sha2::{Digest, Sha256};
 
 use super::parameter::{NormalizedParameterValue, NormalizedParameters};
+use super::safety::PathFingerprint;
 
 /// Canonical Execution Spec 的稳定格式身份，避免其他二进制载荷与本格式混淆。
 const EXECUTION_SPEC_FORMAT: &[u8] = b"cmdbox.execution-spec";
@@ -45,6 +46,14 @@ pub(crate) struct CanonicalExecutionSpec {
     pub(crate) internal_environment: BTreeMap<String, OsString>,
     /// 当前 Safety Policy 语义版本。
     pub(crate) safety_policy_version: u32,
+    /// destructive 目标按执行顺序绑定的完整根对象身份；normal Command 为空。
+    pub(crate) path_fingerprints: Vec<PathFingerprint>,
+    /// Safety Guard 的稳定判定身份，不使用本地化显示文本。
+    pub(crate) safety_decision: String,
+    /// high-risk 强化确认要求版本；普通和 normal Command 为空。
+    pub(crate) confirmation_requirement_version: Option<u32>,
+    /// Target collector 的逻辑协议版本；normal Command 为空。
+    pub(crate) collector_protocol_version: Option<u32>,
     /// 当前 Outcome Policy 语义版本。
     pub(crate) outcome_policy_version: u32,
 }
@@ -102,10 +111,65 @@ impl CanonicalExecutionSpec {
             &self.safety_policy_version.to_le_bytes(),
         );
         record.field(
+            "pathFingerprints",
+            &encode_path_fingerprints(&self.path_fingerprints),
+        );
+        record.field("safetyDecision", self.safety_decision.as_bytes());
+        record.field(
+            "confirmationRequirementVersion",
+            &encode_optional_u32(self.confirmation_requirement_version),
+        );
+        record.field(
+            "collectorProtocolVersion",
+            &encode_optional_u32(self.collector_protocol_version),
+        );
+        record.field(
             "outcomePolicyVersion",
             &self.outcome_policy_version.to_le_bytes(),
         );
         record.finish()
+    }
+}
+
+/// 只对有序 Path Fingerprint 列表计算稳定凭据，供 Run 优先区分目标身份变化。
+pub(crate) fn path_fingerprints_hash_hex(values: &[PathFingerprint]) -> String {
+    encode_hash_hex(&Sha256::digest(encode_path_fingerprints(values)).into())
+}
+
+/// 按稳定执行顺序编码目标路径、Final Path、卷序列号与 128-bit File ID。
+fn encode_path_fingerprints(values: &[PathFingerprint]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(values.len() as u64).to_le_bytes());
+    for value in values {
+        let mut entry = CanonicalWriter::new();
+        entry.field(
+            "normalizedPath",
+            &encode_windows_os_string(value.normalized_path.as_os_str()),
+        );
+        entry.field(
+            "finalPath",
+            &encode_windows_os_string(value.final_path.as_os_str()),
+        );
+        entry.field(
+            "volumeSerialNumber",
+            &value.volume_serial_number.to_le_bytes(),
+        );
+        entry.field("fileId", &value.file_id);
+        entry.field("isReparsePoint", &[u8::from(value.is_reparse_point)]);
+        push_length_prefixed(&mut bytes, &entry.finish());
+    }
+    bytes
+}
+
+/// 编码可选 u32，并保留 `None` 与零值的区别。
+fn encode_optional_u32(value: Option<u32>) -> Vec<u8> {
+    match value {
+        Some(value) => {
+            let mut encoded = vec![1];
+            encoded.extend_from_slice(&value.to_le_bytes());
+            encoded
+        }
+        None => vec![0],
     }
 }
 
@@ -286,6 +350,7 @@ mod tests {
     use crate::execution::parameter::{
         NormalizedParameter, NormalizedParameterValue, NormalizedParameters,
     };
+    use crate::execution::safety::PathFingerprint;
 
     /// 创建所有当前 Hash 组件都有可辨识值的 Canonical Spec。
     fn fixture() -> CanonicalExecutionSpec {
@@ -316,6 +381,10 @@ mod tests {
                 OsString::from(r"C:\Windows\System32\chcp.com"),
             )]),
             safety_policy_version: 4,
+            path_fingerprints: Vec::new(),
+            safety_decision: "notApplicable".to_owned(),
+            confirmation_requirement_version: None,
+            collector_protocol_version: None,
             outcome_policy_version: 5,
         }
     }
@@ -373,6 +442,24 @@ mod tests {
         variants.push(changed);
         let mut changed = baseline.clone();
         changed.safety_policy_version += 1;
+        variants.push(changed);
+        let mut changed = baseline.clone();
+        changed.path_fingerprints.push(PathFingerprint {
+            normalized_path: PathBuf::from(r"C:\Target"),
+            final_path: PathBuf::from(r"C:\Target"),
+            volume_serial_number: 9,
+            file_id: [8; 16],
+            is_reparse_point: false,
+        });
+        variants.push(changed);
+        let mut changed = baseline.clone();
+        changed.safety_decision = "warning".to_owned();
+        variants.push(changed);
+        let mut changed = baseline.clone();
+        changed.confirmation_requirement_version = Some(1);
+        variants.push(changed);
+        let mut changed = baseline.clone();
+        changed.collector_protocol_version = Some(1);
         variants.push(changed);
         let mut changed = baseline.clone();
         changed.outcome_policy_version += 1;

@@ -1,8 +1,8 @@
-//! CMD-02 使用的固定无破坏 Command Block Definition。
+//! CmdBox 固定 Command Block Definition。
 //!
 //! 本模块声明 PowerShell 与 CMD 参数回显 Built-in 的稳定身份、Runner、正常风险级别、
-//! 类型化参数和受限模板。只有显式 `ui-validation` 构建会额外编译短等待、普通非零和
-//! 特殊 Exit Code 三个安全验证 Definition；默认应用仍严格只有两个正式 Built-in。
+//! 类型化参数和受限模板。显式 `ui-validation` 构建会追加三条安全验证 Definition；完整
+//! Windows 删除门禁通过前，永久删除 Definition 只在 `delete-validation` 构建中存在。
 //! Definition 不包含可执行文件、Runner options 或已经渲染的脚本，也不会在构造时创建
 //! 文件或进程。
 
@@ -25,6 +25,10 @@ pub const POWERSHELL_PARAMETER_ECHO_ID: &str = "builtin.parameter-echo.windows-p
 /// CMD 参数回显 Built-in 的稳定 ID。
 pub const CMD_PARAMETER_ECHO_ID: &str = "builtin.parameter-echo.cmd";
 
+/// 完整 Windows 门禁通过前只存在于 `delete-validation` 的永久删除 Built-in ID。
+#[cfg(feature = "delete-validation")]
+pub const DELETE_FOLDERS_ID: &str = "builtin.delete-folders.windows-powershell";
+
 /// 显式真实宿主验收构建使用的固定短等待 Definition ID。
 #[cfg(feature = "ui-validation")]
 pub const UI_VALIDATION_SHORT_WAIT_ID: &str = "builtin.ui-validation.short-wait";
@@ -42,6 +46,34 @@ const POWERSHELL_PARAMETER_ECHO_TEMPLATE: &str = "$ErrorActionPreference = 'Stop
 
 /// CMD 参数回显使用的受限静态模板。
 const CMD_PARAMETER_ECHO_TEMPLATE: &str = "echo({{text}}\r\necho({{count}}\r\n{{#if enabled}}echo(enabled\r\n{{/if}}echo({{mode}}\r\necho({{folder}}\r\n{{#each folders}}echo({{this}}\r\n{{/each}}";
+
+/// 永久删除固定模板；Session 在可信 Executor 原子完成前拒绝启动该执行种类。
+#[cfg(feature = "delete-validation")]
+const DELETE_FOLDERS_TEMPLATE: &str = "$ErrorActionPreference = 'Stop'\n$failed = 0\n{{#each folders}}try {\n  Remove-Item -LiteralPath {{this}} -Recurse -Force -ErrorAction Stop\n} catch {\n  $failed++\n}\n{{/each}}if ($failed -gt 0) { exit 1 }\nexit 0";
+
+/// Command Definition 声明的结构化 Safety Policy。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub(crate) enum SafetyPolicy {
+    /// normal Command 不操作破坏性路径。
+    Generic { version: u32 },
+    /// 永久删除只接受指定 Folders 参数，并绑定强化确认与 collector 协议。
+    DeletePaths {
+        version: u32,
+        parameter_key: String,
+        confirmation_version: u32,
+        collector_protocol_version: u32,
+    },
+}
+
+impl SafetyPolicy {
+    /// 返回进入 Canonical Execution Spec 的策略版本。
+    pub(crate) const fn version(&self) -> u32 {
+        match self {
+            Self::Generic { version } | Self::DeletePaths { version, .. } => *version,
+        }
+    }
+}
 
 /// 显式真实宿主验收使用的固定五秒 PowerShell 短等待模板。
 #[cfg(feature = "ui-validation")]
@@ -117,6 +149,8 @@ pub(crate) struct CommandBlockDefinition {
     pub environment: BTreeMap<String, String>,
     /// Rust Core 用于解释自然终态或类型化目标事实的版本化策略。
     pub(crate) outcome_policy: OutcomePolicy,
+    /// Rust Core 在渲染与启动前执行的结构化 Safety Policy。
+    pub(crate) safety_policy: SafetyPolicy,
 }
 
 /// 按稳定顺序返回正式 Built-in，并仅在显式验证 feature 下追加短等待 Definition。
@@ -134,6 +168,7 @@ pub(crate) fn builtin_command_definitions() -> Vec<CommandBlockDefinition> {
             parameters: echo_parameter_definitions(),
             environment: BTreeMap::new(),
             outcome_policy: OutcomePolicy::standard(),
+            safety_policy: SafetyPolicy::Generic { version: 1 },
         },
         CommandBlockDefinition {
             id: CMD_PARAMETER_ECHO_ID.to_owned(),
@@ -147,6 +182,7 @@ pub(crate) fn builtin_command_definitions() -> Vec<CommandBlockDefinition> {
             parameters: echo_parameter_definitions(),
             environment: BTreeMap::new(),
             outcome_policy: OutcomePolicy::standard(),
+            safety_policy: SafetyPolicy::Generic { version: 1 },
         },
     ];
     #[cfg(feature = "ui-validation")]
@@ -157,7 +193,43 @@ pub(crate) fn builtin_command_definitions() -> Vec<CommandBlockDefinition> {
         definitions.push(ui_validation_special_exit_definition());
         definitions
     };
+    #[cfg(feature = "delete-validation")]
+    let definitions = {
+        let mut definitions = definitions;
+        definitions.push(delete_folders_definition());
+        definitions
+    };
     definitions
+}
+
+/// 创建只在安全门禁构建存在的永久删除 Definition。
+#[cfg(feature = "delete-validation")]
+fn delete_folders_definition() -> CommandBlockDefinition {
+    CommandBlockDefinition {
+        id: DELETE_FOLDERS_ID.to_owned(),
+        name: "快速永久删除多个文件夹".to_owned(),
+        description: "永久删除所选文件夹，不经过回收站。".to_owned(),
+        origin: CommandOrigin::Builtin,
+        runner: RunnerType::WindowsPowerShell,
+        risk_level: RiskLevel::Destructive,
+        revision: 1,
+        template: DELETE_FOLDERS_TEMPLATE.to_owned(),
+        parameters: vec![ParameterDefinition::Folders(FoldersParameterDefinition {
+            base: parameter_base("folders", "要永久删除的文件夹"),
+            must_exist: true,
+            min_items: Some(1),
+            max_items: Some(32),
+            default_value: None,
+        })],
+        environment: BTreeMap::new(),
+        outcome_policy: OutcomePolicy::target_results(1),
+        safety_policy: SafetyPolicy::DeletePaths {
+            version: super::safety::DELETE_PATH_POLICY_VERSION,
+            parameter_key: "folders".to_owned(),
+            confirmation_version: 1,
+            collector_protocol_version: 1,
+        },
+    }
 }
 
 /// 创建只存在于显式验证构建、复用普通 Planner/Runner 的无参数短等待 Definition。
@@ -175,6 +247,7 @@ fn ui_validation_short_wait_definition() -> CommandBlockDefinition {
         parameters: Vec::new(),
         environment: BTreeMap::new(),
         outcome_policy: OutcomePolicy::standard(),
+        safety_policy: SafetyPolicy::Generic { version: 1 },
     }
 }
 
@@ -193,6 +266,7 @@ fn ui_validation_ordinary_failure_definition() -> CommandBlockDefinition {
         parameters: Vec::new(),
         environment: BTreeMap::new(),
         outcome_policy: OutcomePolicy::standard(),
+        safety_policy: SafetyPolicy::Generic { version: 1 },
     }
 }
 
@@ -219,6 +293,7 @@ fn ui_validation_special_exit_definition() -> CommandBlockDefinition {
             vec![ExitCodeRange { start: 0, end: 1 }],
             vec![ExitCodeRange { start: 2, end: 7 }],
         ),
+        safety_policy: SafetyPolicy::Generic { version: 1 },
     }
 }
 
@@ -284,6 +359,8 @@ mod tests {
         builtin_command_definitions, CommandOrigin, RiskLevel, RunnerType, CMD_PARAMETER_ECHO_ID,
         POWERSHELL_PARAMETER_ECHO_ID,
     };
+    #[cfg(feature = "delete-validation")]
+    use super::{SafetyPolicy, DELETE_FOLDERS_ID};
     #[cfg(feature = "ui-validation")]
     use crate::execution::outcome::{Outcome, OutcomePolicy};
     use crate::execution::parameter::{validate_parameter_values, ParameterKind, ParameterValue};
@@ -369,13 +446,42 @@ mod tests {
         }
     }
 
+    /// 验证永久删除 Definition 只在门禁 feature 中出现且保持单一 Folders 输入契约。
+    #[cfg(feature = "delete-validation")]
+    #[test]
+    fn exposes_feature_gated_delete_definition() {
+        let definitions = builtin_command_definitions();
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.id == DELETE_FOLDERS_ID)
+            .expect("delete-validation 应追加永久删除 Definition");
+
+        assert_eq!(definition.origin, CommandOrigin::Builtin);
+        assert_eq!(definition.runner, RunnerType::WindowsPowerShell);
+        assert_eq!(definition.risk_level, RiskLevel::Destructive);
+        assert_eq!(definition.parameters.len(), 1);
+        assert_eq!(definition.parameters[0].kind(), ParameterKind::Folders);
+        assert!(matches!(
+            &definition.safety_policy,
+            SafetyPolicy::DeletePaths {
+                parameter_key,
+                confirmation_version: 1,
+                collector_protocol_version: 1,
+                ..
+            } if parameter_key == "folders"
+        ));
+    }
+
     /// 验证默认构建严格只暴露两个正式 Built-in，验证 ID 不能经 Planner 读取。
     #[cfg(not(feature = "ui-validation"))]
     #[test]
     fn excludes_ui_validation_definition_from_default_registry() {
         let planner = ExecutionPlanner::new();
 
-        assert_eq!(planner.list_command_blocks().len(), 2);
+        assert_eq!(
+            planner.list_command_blocks().len(),
+            2 + usize::from(cfg!(feature = "delete-validation"))
+        );
         let error = planner
             .get_command_block(UI_VALIDATION_SHORT_WAIT_ID)
             .expect_err("默认 Registry 不得读取验证 Definition");
@@ -388,7 +494,10 @@ mod tests {
     fn exposes_ui_validation_definition_through_the_same_planner_flow() {
         let definitions = builtin_command_definitions();
         let validation_definition = &definitions[2];
-        assert_eq!(definitions.len(), 5);
+        assert_eq!(
+            definitions.len(),
+            5 + usize::from(cfg!(feature = "delete-validation"))
+        );
         assert_eq!(validation_definition.id, UI_VALIDATION_SHORT_WAIT_ID);
         assert_eq!(validation_definition.origin, CommandOrigin::Builtin);
         assert_eq!(validation_definition.runner, RunnerType::WindowsPowerShell);
@@ -401,7 +510,10 @@ mod tests {
         let planner = ExecutionPlanner::new();
         let summaries = planner.list_command_blocks();
 
-        assert_eq!(summaries.len(), 5);
+        assert_eq!(
+            summaries.len(),
+            5 + usize::from(cfg!(feature = "delete-validation"))
+        );
         assert_eq!(summaries[0].id, POWERSHELL_PARAMETER_ECHO_ID);
         assert_eq!(summaries[1].id, CMD_PARAMETER_ECHO_ID);
         assert_eq!(summaries[2].id, UI_VALIDATION_SHORT_WAIT_ID);
@@ -430,6 +542,8 @@ mod tests {
                 expected_revision: request.expected_revision,
                 parameter_values: BTreeMap::new(),
                 execution_spec_hash: preview.execution_spec_hash,
+                safety_confirmation: None,
+                target_identity_hash: None,
             })
             .expect("验证 Definition 应通过同一 Run 复验入口");
 
@@ -483,6 +597,8 @@ mod tests {
                 expected_revision: special_request.expected_revision,
                 parameter_values: special_request.parameter_values,
                 execution_spec_hash: special_preview.execution_spec_hash,
+                safety_confirmation: None,
+                target_identity_hash: None,
             })
             .expect("特殊 Exit Code Definition 应通过同一 Run 复验入口");
     }

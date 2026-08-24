@@ -303,6 +303,9 @@ fn public_planner_error(error: PlannerError) -> ApiError {
         PlannerErrorCode::RunnerUnavailable => "系统 Runner 不可用",
         PlannerErrorCode::InternalContract => "Command Block 内部契约无效",
         PlannerErrorCode::StalePreview => "Preview 已失效，请重新生成",
+        PlannerErrorCode::SafetyBlocked => "所选目标未通过永久删除安全检查",
+        PlannerErrorCode::TargetChanged => "目标在 Preview 后发生变化，请重新生成 Preview",
+        PlannerErrorCode::ConfirmationRequired => "需要按当前 Preview 完成强化确认",
     };
     ApiError {
         code: error.code.as_str(),
@@ -315,6 +318,10 @@ fn public_planner_error(error: PlannerError) -> ApiError {
 /// 把可能包含本机路径或系统错误的启动失败收敛为稳定公开错误。
 fn public_start_error(error: ExecutionStartError) -> ApiError {
     match error {
+        ExecutionStartError::ExecutorUnavailable => ApiError::simple(
+            "EXECUTOR_UNAVAILABLE",
+            "当前 Command Block 的可信 Executor 尚未完成安全门禁",
+        ),
         ExecutionStartError::Artifact(_) => {
             ApiError::simple("ARTIFACT_PREPARATION_FAILED", "无法准备 Execution 临时脚本")
         }
@@ -536,6 +543,8 @@ mod tests {
             expected_revision: preview.revision,
             parameter_values: values,
             execution_spec_hash: preview.execution_spec_hash.clone(),
+            safety_confirmation: None,
+            target_identity_hash: None,
         };
         (preview, request)
     }
@@ -789,6 +798,18 @@ mod tests {
                 "Command Block 内部契约无效",
             ),
             (PlannerErrorCode::StalePreview, "Preview 已失效，请重新生成"),
+            (
+                PlannerErrorCode::SafetyBlocked,
+                "所选目标未通过永久删除安全检查",
+            ),
+            (
+                PlannerErrorCode::TargetChanged,
+                "目标在 Preview 后发生变化，请重新生成 Preview",
+            ),
+            (
+                PlannerErrorCode::ConfirmationRequired,
+                "需要按当前 Preview 完成强化确认",
+            ),
         ];
         for (code, expected_message) in cases {
             let error = public_planner_error(PlannerError {
@@ -834,6 +855,13 @@ mod tests {
             .message
             .contains(private_path.to_string_lossy().as_ref()));
         assert!(!error.message.contains("private detail"));
+
+        let unavailable = public_start_error(ExecutionStartError::ExecutorUnavailable);
+        assert_eq!(unavailable.code, "EXECUTOR_UNAVAILABLE");
+        assert_eq!(
+            unavailable.message,
+            "当前 Command Block 的可信 Executor 尚未完成安全门禁"
+        );
     }
 
     /// 验证 stale、revision 与 validation 在临时目录、Active、线程和事件副作用前失败。
@@ -959,6 +987,8 @@ mod tests {
                 expected_revision: preview.revision,
                 parameter_values: values,
                 execution_spec_hash: preview.execution_spec_hash.clone(),
+                safety_confirmation: None,
+                target_identity_hash: None,
             };
             let manager = ExecutionManager::new();
             let channel_events = Arc::new(Mutex::new(Vec::<ExecutionStreamEvent>::new()));
@@ -1165,6 +1195,8 @@ mod tests {
                 expected_revision: preview.revision,
                 parameter_values,
                 execution_spec_hash: preview.execution_spec_hash,
+                safety_confirmation: None,
+                target_identity_hash: None,
             };
             let manager = ExecutionManager::new();
             let channel_events = Arc::new(Mutex::new(Vec::<ExecutionStreamEvent>::new()));
@@ -1241,6 +1273,8 @@ mod tests {
                 expected_revision: preview.revision,
                 parameter_values: values,
                 execution_spec_hash: preview.execution_spec_hash.clone(),
+                safety_confirmation: None,
+                target_identity_hash: None,
             };
             assert!(!preview.preview_text.contains(text));
             let manager = ExecutionManager::new();

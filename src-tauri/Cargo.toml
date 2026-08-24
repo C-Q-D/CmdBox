@@ -11,6 +11,8 @@ default-run = "cmdbox"
 process-test-helper = []
 # 只在显式真实宿主验收构建中注册固定短等待 Definition，默认应用与 release 不启用。
 ui-validation = []
+# 永久删除通过完整 Windows 宿主门禁前，只在显式验证构建中注册。
+delete-validation = []
 
 [lib]
 # Windows 上二进制与库不能同名，因此保留 `_lib` 后缀。

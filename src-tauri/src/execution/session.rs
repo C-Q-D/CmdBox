@@ -32,6 +32,8 @@ const SESSION_EVENT_CAPACITY: usize = 64;
 /// Execution Session 启动失败。
 #[derive(Debug)]
 pub enum ExecutionStartError {
+    /// destructive Definition 已验证，但可信 Executor 尚未接入当前构建。
+    ExecutorUnavailable,
     /// 无法创建已验证脚本的临时 Artifact。
     Artifact(ArtifactError),
     /// 无法准备或恢复受管进程。
@@ -43,6 +45,7 @@ pub enum ExecutionStartError {
 impl Display for ExecutionStartError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ExecutorUnavailable => formatter.write_str("可信 Execution Executor 尚未就绪"),
             Self::Artifact(source) => write!(formatter, "Execution Artifact 创建失败：{source}"),
             Self::Process(source) => write!(formatter, "Execution 进程启动失败：{source}"),
             Self::Thread(source) => write!(formatter, "Execution 后台线程创建失败：{source}"),
@@ -53,6 +56,7 @@ impl Display for ExecutionStartError {
 impl Error for ExecutionStartError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::ExecutorUnavailable => None,
             Self::Artifact(source) => Some(source),
             Self::Process(source) => Some(source),
             Self::Thread(source) => Some(source),
@@ -363,6 +367,9 @@ impl ExecutionManager {
         &self,
         verified: VerifiedExecution,
     ) -> Result<StartedExecution, ExecutionStartError> {
+        if !verified.launch_ready() {
+            return Err(ExecutionStartError::ExecutorUnavailable);
+        }
         let (launch, outcome_policy) = verified
             .into_session_parts()
             .map_err(ExecutionStartError::Artifact)?;

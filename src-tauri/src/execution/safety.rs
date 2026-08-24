@@ -4,9 +4,6 @@
 //! Handle 复验的 Final Path、卷序列号和 128-bit File ID；后续 Preview、Run 和紧邻副作用
 //! 的授权检查必须复用同一模型，不能退回字符串或 `Path::exists()` 判断。
 
-// 本原子先交付隔离的 Safety 深模块；下一原子接入 Planner 后移除此临时模块级豁免。
-#![allow(dead_code)]
-
 use std::error::Error;
 use std::ffi::{c_void, OsStr, OsString};
 use std::fmt::{Display, Formatter};
@@ -31,7 +28,7 @@ use windows_sys::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWind
 use windows_sys::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_OneDrive, FOLDERID_Profile,
     FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX64,
-    FOLDERID_ProgramFilesX86, SHGetKnownFolderPath, KF_FLAG_DONT_VERIFY,
+    FOLDERID_ProgramFilesX86, FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DONT_VERIFY,
 };
 
 /// DeletePaths Safety Policy 的首个稳定语义版本。
@@ -62,6 +59,24 @@ pub(crate) enum DeleteSafetyErrorCode {
     CriticalPath,
     /// 系统保护路径集合无法完整建立。
     ProtectedPathsUnavailable,
+}
+
+impl DeleteSafetyErrorCode {
+    /// 返回不会因 Debug 格式变化而漂移的内部稳定错误码。
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyTargets => "emptyTargets",
+            Self::DangerousNamespace => "dangerousNamespace",
+            Self::NotAbsolute => "notAbsolute",
+            Self::EscapesRoot => "escapesRoot",
+            Self::NotFound => "notFound",
+            Self::NotDirectory => "notDirectory",
+            Self::ReparsePoint => "reparsePoint",
+            Self::Unavailable => "unavailable",
+            Self::CriticalPath => "criticalPath",
+            Self::ProtectedPathsUnavailable => "protectedPathsUnavailable",
+        }
+    }
 }
 
 /// 不携带任意路径文本的稳定 Safety Guard 错误。
@@ -161,6 +176,13 @@ pub(crate) struct ProtectedPathSet {
 }
 
 impl ProtectedPathSet {
+    /// 按 Tauri Windows App Data 约定建立 CmdBox 的完整系统保护根。
+    pub(crate) fn for_cmdbox() -> Result<Self, DeleteSafetyError> {
+        let roaming = query_known_folder(&FOLDERID_RoamingAppData, true)?
+            .ok_or_else(DeleteSafetyError::protected_paths)?;
+        Self::from_system(roaming.join("com.cmdbox.app"))
+    }
+
     /// 从 Windows API 建立运行主机的保护根；`app_data` 必须是 Tauri 解析的 CmdBox App Data。
     pub(crate) fn from_system(app_data: PathBuf) -> Result<Self, DeleteSafetyError> {
         let windows = query_system_directory(GetWindowsDirectoryW)?;
@@ -200,7 +222,7 @@ impl ProtectedPathSet {
 
     /// 创建测试和纯策略验证使用的显式保护根，不读取任何系统目录。
     #[cfg(test)]
-    fn explicit(
+    pub(crate) fn explicit(
         critical_trees: Vec<PathBuf>,
         critical_exact: Vec<PathBuf>,
         high_risk_exact: Vec<PathBuf>,
@@ -218,15 +240,11 @@ impl ProtectedPathSet {
             return PathClassification::Critical;
         }
         for candidate in [normalized, final_path] {
-            if self
-                .critical_trees
-                .iter()
-                .any(|root| is_same_or_descendant(candidate, root))
-                || self
-                    .critical_exact
-                    .iter()
-                    .any(|root| windows_paths_equal(candidate, root))
-            {
+            if self.critical_trees.iter().any(|root| {
+                is_same_or_descendant(candidate, root) || is_same_or_descendant(root, candidate)
+            }) || self.critical_exact.iter().any(|root| {
+                windows_paths_equal(candidate, root) || is_same_or_descendant(root, candidate)
+            }) {
                 return PathClassification::Critical;
             }
         }
@@ -871,6 +889,11 @@ mod tests {
         }
         let protected = policy(&root);
 
+        let ancestor_error =
+            inspect_delete_targets(&[root.to_string_lossy().into_owned()], &protected)
+                .expect_err("包含任一 critical 根的祖先目录必须被拒绝");
+        assert_eq!(ancestor_error.code, DeleteSafetyErrorCode::CriticalPath);
+
         for path in [&critical_tree, &critical_child, &critical_exact] {
             let error = inspect_delete_targets(&[path.to_string_lossy().into_owned()], &protected)
                 .expect_err("critical 目标必须被拒绝");
@@ -928,7 +951,7 @@ mod tests {
         ];
 
         for (value, expected) in cases {
-            let error = inspect_delete_targets(&[value.clone()], &protected)
+            let error = inspect_delete_targets(std::slice::from_ref(&value), &protected)
                 .expect_err("非法或危险目标必须被拒绝");
             assert_eq!(error.code, expected, "目标：{value}");
         }

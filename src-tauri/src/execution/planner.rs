@@ -14,25 +14,28 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::artifact::{ArtifactError, MaterializedScript, RenderedScript};
-use super::command::{builtin_command_definitions, CommandBlockDefinition, RiskLevel, RunnerType};
+use super::command::{
+    builtin_command_definitions, CommandBlockDefinition, RiskLevel, RunnerType, SafetyPolicy,
+};
 use super::parameter::{
     validate_parameter_values, NormalizedParameterValue, NormalizedParameters,
     ParameterValidationError, ParameterValues,
 };
+use super::safety::{
+    inspect_delete_targets, DeleteRiskDecision, DeleteSafetyErrorCode, DeleteSafetyReport,
+    PathFingerprint, ProtectedPathSet,
+};
 use super::serializer::{
     render_cmd, render_windows_powershell, CmdRenderError, PowerShellRenderError,
 };
-use super::spec::CanonicalExecutionSpec;
+use super::spec::{path_fingerprints_hash_hex, CanonicalExecutionSpec};
 use super::template::{parse_template, TemplateError};
 use crate::process::windows::runner::{
     CmdRunner, ProcessLaunch, ResolvedRunner, WindowsPowerShellRunner,
 };
 
 /// 当前 Canonical Execution Spec 二进制编码版本。
-const EXECUTION_SPEC_SCHEMA_VERSION: u32 = 2;
-
-/// 当前两个 normal Built-in 使用的不适用 Safety Policy 语义版本。
-const NORMAL_SAFETY_POLICY_VERSION: u32 = 1;
+const EXECUTION_SPEC_SCHEMA_VERSION: u32 = 3;
 
 /// 单个参数摘要最多返回的可读值数量。
 const PARAMETER_SUMMARY_MAX_VALUES: usize = 5;
@@ -73,6 +76,24 @@ pub struct VerifyRunRequest {
     pub parameter_values: ParameterValues,
     /// Preview 返回且用户已经确认的完整 Execution Spec SHA-256。
     pub execution_spec_hash: String,
+    /// destructive high-risk Preview 要求的明确确认响应；normal Command 省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub safety_confirmation: Option<SafetyConfirmationResponse>,
+    /// Preview 返回的目标身份凭据；用于在完整 Hash 比较前识别目标被替换。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub target_identity_hash: Option<String>,
+}
+
+/// high-risk destructive Run 的窄确认响应。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SafetyConfirmationResponse {
+    /// 当前版本固定要求的确认短语。
+    pub phrase: String,
 }
 
 /// Command Workspace 列表使用的公开 Command Block 字段白名单。
@@ -249,8 +270,28 @@ pub struct PreviewCommandResponse {
     pub action_label: String,
     /// Rust Core 生成的结构化安全结论。
     pub safety: PreviewSafetyDecision,
+    /// high-risk Preview 需要的确认要求；普通和 normal Command 为空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub confirmation_requirement: Option<PreviewConfirmationRequirement>,
+    /// destructive 目标身份列表的稳定凭据；normal Command 为空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub target_identity_hash: Option<String>,
     /// 覆盖完整 Canonical Execution Spec 的 64 字符 SHA-256。
     pub execution_spec_hash: String,
+}
+
+/// Rust Core 对 high-risk destructive 操作给出的版本化确认要求。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewConfirmationRequirement {
+    /// 进入 Execution Spec 的确认语义版本。
+    pub version: u32,
+    /// 用户必须精确提交的固定短语。
+    pub phrase: String,
 }
 
 /// Planner 可跨后续 IPC 稳定映射的错误码。
@@ -273,6 +314,12 @@ pub enum PlannerErrorCode {
     InternalContract,
     /// Run 重建的完整 Execution Spec Hash 与 Preview 不同。
     StalePreview,
+    /// destructive 目标根或关键路径被 Safety Guard 阻断。
+    SafetyBlocked,
+    /// Preview 后目标对象身份发生变化。
+    TargetChanged,
+    /// high-risk Run 缺少或提交了错误的强化确认。
+    ConfirmationRequired,
 }
 
 impl PlannerErrorCode {
@@ -287,6 +334,9 @@ impl PlannerErrorCode {
             Self::RunnerUnavailable => "RUNNER_UNAVAILABLE",
             Self::InternalContract => "INTERNAL_CONTRACT",
             Self::StalePreview => "STALE_PREVIEW",
+            Self::SafetyBlocked => "SAFETY_BLOCKED",
+            Self::TargetChanged => "TARGET_CHANGED",
+            Self::ConfirmationRequired => "CONFIRMATION_REQUIRED",
         }
     }
 }
@@ -351,6 +401,12 @@ pub struct VerifiedExecution {
     environment: BTreeMap<String, OsString>,
     /// 与 Hash 中 version 相同、已通过 Definition 校验的结果解释策略。
     outcome_policy: super::outcome::OutcomePolicy,
+    /// 下一原子接入可信 collector 前，destructive Verified 值不得启动外部进程。
+    launch_ready: bool,
+    /// Hash 已绑定的有序删除目标身份；normal Command 为空。
+    path_fingerprints: Vec<PathFingerprint>,
+    /// Hash 已绑定且下一原子必须直接消费的 collector 逻辑协议版本。
+    collector_protocol_version: Option<u32>,
 }
 
 /// 只输出授权值的非敏感结构摘要，不输出 Runner、工作目录或参数原值。
@@ -364,6 +420,11 @@ impl std::fmt::Debug for VerifiedExecution {
             .field(
                 "working_directory_bound",
                 &self.working_directory.is_absolute(),
+            )
+            .field("target_count", &self.path_fingerprints.len())
+            .field(
+                "collector_protocol_version",
+                &self.collector_protocol_version,
             )
             .finish()
     }
@@ -384,6 +445,7 @@ impl VerifiedExecution {
             working_directory,
             environment,
             outcome_policy,
+            ..
         } = self;
         let materialized_script = MaterializedScript::create(rendered_script)?;
         Ok((
@@ -394,6 +456,11 @@ impl VerifiedExecution {
             ),
             outcome_policy,
         ))
+    }
+
+    /// 当前授权值是否已有可信 Executor 可安全启动。
+    pub(crate) const fn launch_ready(&self) -> bool {
+        self.launch_ready
     }
 }
 
@@ -430,6 +497,9 @@ pub(crate) fn verified_windows_powershell_with_policy_for_test(
         working_directory,
         environment: BTreeMap::new(),
         outcome_policy,
+        launch_ready: true,
+        path_fingerprints: Vec::new(),
+        collector_protocol_version: None,
     }
 }
 
@@ -442,6 +512,9 @@ struct PreparedRendered {
     /// CMD 非空参数使用的确定性私有环境绑定；PowerShell 为空。
     private_environment: BTreeMap<String, OsString>,
 }
+
+/// Safety Policy 应用后的报告、确认语义版本和 collector 协议版本。
+type AppliedSafetyPolicy = (Option<DeleteSafetyReport>, Option<u32>, Option<u32>);
 
 /// Preview 与 Run 复验共用的私有完整计算结果。
 struct PreparedExecution {
@@ -459,6 +532,12 @@ struct PreparedExecution {
     environment: BTreeMap<String, OsString>,
     /// 当前全部 Execution Spec 事实计算得到的 SHA-256。
     execution_spec_hash: String,
+    /// 当前 Safety Guard 的结构化输出；normal Command 为空。
+    safety_report: Option<DeleteSafetyReport>,
+    /// high-risk 确认语义版本。
+    confirmation_requirement_version: Option<u32>,
+    /// 已进入 Hash、必须交给固定 Executor 的 collector 逻辑协议版本。
+    collector_protocol_version: Option<u32>,
 }
 
 /// 固定 Built-in Definition 的可信 Preview 与 Run 复验深模块。
@@ -506,6 +585,26 @@ impl ExecutionPlanner {
         let definition = load_current_definition(&request.command_block_id)?;
         ensure_revision(&definition, request.expected_revision)?;
         let prepared = prepare_execution(definition, &request.parameter_values)?;
+        if let Some(report) = prepared.safety_report.as_ref() {
+            let current = path_fingerprints_hash_hex(
+                &report
+                    .targets
+                    .iter()
+                    .map(|target| target.fingerprint.clone())
+                    .collect::<Vec<_>>(),
+            );
+            if request.target_identity_hash.as_deref() != Some(current.as_str()) {
+                return Err(PlannerError::new(
+                    PlannerErrorCode::TargetChanged,
+                    None,
+                    None,
+                ));
+            }
+        }
+        validate_safety_confirmation(
+            prepared.confirmation_requirement_version,
+            request.safety_confirmation.as_ref(),
+        )?;
         if prepared.execution_spec_hash != request.execution_spec_hash {
             return Err(PlannerError::new(
                 PlannerErrorCode::StalePreview,
@@ -520,7 +619,40 @@ impl ExecutionPlanner {
             working_directory: prepared.working_directory,
             environment: prepared.environment,
             outcome_policy: prepared.definition.outcome_policy,
+            launch_ready: prepared.safety_report.is_none(),
+            path_fingerprints: prepared
+                .safety_report
+                .map(|report| {
+                    report
+                        .targets
+                        .into_iter()
+                        .map(|target| target.fingerprint)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            collector_protocol_version: prepared.collector_protocol_version,
         })
+    }
+}
+
+/// 验证版本化 high-risk 确认；当前版本只接受大小写精确的固定短语。
+fn validate_safety_confirmation(
+    requirement_version: Option<u32>,
+    response: Option<&SafetyConfirmationResponse>,
+) -> Result<(), PlannerError> {
+    match requirement_version {
+        None => Ok(()),
+        Some(1) if response.is_some_and(|confirmation| confirmation.phrase == "DELETE") => Ok(()),
+        Some(1) => Err(PlannerError::new(
+            PlannerErrorCode::ConfirmationRequired,
+            None,
+            None,
+        )),
+        Some(_) => Err(PlannerError::new(
+            PlannerErrorCode::InternalContract,
+            None,
+            Some("unsupportedConfirmationVersion".to_owned()),
+        )),
     }
 }
 
@@ -552,6 +684,7 @@ fn prepare_execution(
     definition: CommandBlockDefinition,
     parameter_values: &ParameterValues,
 ) -> Result<PreparedExecution, PlannerError> {
+    validate_definition_safety_contract(&definition)?;
     definition.outcome_policy.validate().map_err(|error| {
         let detail_code = match error {
             super::outcome::OutcomePolicyError::ZeroVersion => "outcomePolicyZeroVersion",
@@ -566,8 +699,11 @@ fn prepare_execution(
             Some(detail_code.to_owned()),
         )
     })?;
-    let normalized_parameters = validate_parameter_values(&definition.parameters, parameter_values)
-        .map_err(planner_parameter_error)?;
+    let mut normalized_parameters =
+        validate_parameter_values(&definition.parameters, parameter_values)
+            .map_err(planner_parameter_error)?;
+    let (safety_report, confirmation_requirement_version, collector_protocol_version) =
+        apply_safety_policy(&definition, &mut normalized_parameters)?;
     let ast = parse_template(&definition.template, &definition.parameters)
         .map_err(planner_template_error)?;
     let (rendered, resolved_runner) = match definition.runner {
@@ -630,7 +766,25 @@ fn prepare_execution(
         working_directory: working_directory.clone(),
         explicit_environment: explicit_environment.clone(),
         internal_environment,
-        safety_policy_version: NORMAL_SAFETY_POLICY_VERSION,
+        safety_policy_version: definition.safety_policy.version(),
+        path_fingerprints: safety_report
+            .as_ref()
+            .map(|report| {
+                report
+                    .targets
+                    .iter()
+                    .map(|target| target.fingerprint.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        safety_decision: match safety_report.as_ref().map(|report| report.risk) {
+            None => "notApplicable",
+            Some(DeleteRiskDecision::Normal) => "passed",
+            Some(DeleteRiskDecision::HighRisk) => "warning",
+        }
+        .to_owned(),
+        confirmation_requirement_version,
+        collector_protocol_version,
         outcome_policy_version: definition.outcome_policy.version(),
     }
     .hash_hex();
@@ -643,7 +797,132 @@ fn prepare_execution(
         working_directory,
         environment,
         execution_spec_hash,
+        safety_report,
+        confirmation_requirement_version,
+        collector_protocol_version,
     })
+}
+
+/// 拒绝风险等级、Safety Policy 或版本配置不一致的可信 Definition。
+fn validate_definition_safety_contract(
+    definition: &CommandBlockDefinition,
+) -> Result<(), PlannerError> {
+    let valid = match (&definition.risk_level, &definition.safety_policy) {
+        (RiskLevel::Normal, SafetyPolicy::Generic { version }) => *version > 0,
+        (
+            RiskLevel::Destructive,
+            SafetyPolicy::DeletePaths {
+                version,
+                confirmation_version,
+                collector_protocol_version,
+                ..
+            },
+        ) => {
+            *version == super::safety::DELETE_PATH_POLICY_VERSION
+                && *confirmation_version == 1
+                && *collector_protocol_version == 1
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(PlannerError::new(
+            PlannerErrorCode::InternalContract,
+            None,
+            Some("invalidSafetyPolicy".to_owned()),
+        ));
+    }
+    Ok(())
+}
+
+/// 将 Definition 的结构化 Safety Policy 应用于已类型化参数，并让删除模板只看到折叠目标。
+fn apply_safety_policy(
+    definition: &CommandBlockDefinition,
+    normalized: &mut NormalizedParameters,
+) -> Result<AppliedSafetyPolicy, PlannerError> {
+    if matches!(definition.safety_policy, SafetyPolicy::Generic { .. }) {
+        return Ok((None, None, None));
+    }
+    let protected = ProtectedPathSet::for_cmdbox().map_err(|_| {
+        PlannerError::new(
+            PlannerErrorCode::InternalContract,
+            None,
+            Some("protectedPathsUnavailable".to_owned()),
+        )
+    })?;
+    apply_safety_policy_with_protected(definition, normalized, &protected)
+}
+
+/// 使用调用方已经建立的保护根执行删除策略；测试可注入隔离目录验证 high-risk 分支。
+fn apply_safety_policy_with_protected(
+    definition: &CommandBlockDefinition,
+    normalized: &mut NormalizedParameters,
+    protected: &ProtectedPathSet,
+) -> Result<AppliedSafetyPolicy, PlannerError> {
+    let SafetyPolicy::DeletePaths {
+        parameter_key,
+        confirmation_version,
+        collector_protocol_version,
+        ..
+    } = &definition.safety_policy
+    else {
+        return Ok((None, None, None));
+    };
+    let Some(entry) = normalized
+        .entries
+        .iter_mut()
+        .find(|entry| entry.key == *parameter_key)
+    else {
+        return Err(PlannerError::new(
+            PlannerErrorCode::InternalContract,
+            Some(parameter_key.clone()),
+            Some("deletePathsParameterMissing".to_owned()),
+        ));
+    };
+    let Some(NormalizedParameterValue::Folders(values)) = entry.value.as_mut() else {
+        return Err(PlannerError::new(
+            PlannerErrorCode::InternalContract,
+            Some(parameter_key.clone()),
+            Some("deletePathsParameterMustBeFolders".to_owned()),
+        ));
+    };
+    let report = inspect_delete_targets(values, protected).map_err(|error| {
+        let code = match error.code {
+            DeleteSafetyErrorCode::CriticalPath
+            | DeleteSafetyErrorCode::ReparsePoint
+            | DeleteSafetyErrorCode::DangerousNamespace => PlannerErrorCode::SafetyBlocked,
+            _ => PlannerErrorCode::ValidationFailed,
+        };
+        PlannerError::new(
+            code,
+            Some(parameter_key.clone()),
+            Some(error.code.as_str().to_owned()),
+        )
+    })?;
+    *values = report
+        .targets
+        .iter()
+        .map(|target| {
+            target
+                .fingerprint
+                .normalized_path
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    PlannerError::new(
+                        PlannerErrorCode::InternalContract,
+                        Some(parameter_key.clone()),
+                        Some("deletePathEncodingChanged".to_owned()),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let confirmation =
+        (report.risk == DeleteRiskDecision::HighRisk).then_some(*confirmation_version);
+    Ok((
+        Some(report),
+        confirmation,
+        Some(*collector_protocol_version),
+    ))
 }
 
 /// 校验 CMD Definition 环境键，并保护所有 `CMDBOX_INTERNAL_` 私有名称不被配置覆盖。
@@ -694,6 +973,64 @@ fn build_preview_response(
     let (preview_text, truncated) =
         truncate_utf8(&prepared.rendered.script_text, preview_text_max_bytes);
 
+    let (action_label, safety, confirmation_requirement, target_identity_hash) =
+        if let Some(report) = &prepared.safety_report {
+            let mut warnings = Vec::new();
+            if report.folded_count > 0 {
+                warnings.push(PreviewSafetyWarning {
+                    code: "ANCESTOR_COLLAPSED".to_owned(),
+                    message: format!(
+                        "{} 个重复或子目录已折叠，不会重复删除。",
+                        report.folded_count
+                    ),
+                });
+            }
+            if report.risk == DeleteRiskDecision::HighRisk {
+                warnings.push(PreviewSafetyWarning {
+                    code: "HIGH_RISK_USER_ROOT".to_owned(),
+                    message: "所选目标包含常用用户目录根，需要输入 DELETE 确认。".to_owned(),
+                });
+            }
+            let fingerprints = report
+                .targets
+                .iter()
+                .map(|target| target.fingerprint.clone())
+                .collect::<Vec<_>>();
+            (
+                "永久删除".to_owned(),
+                PreviewSafetyDecision {
+                    state: if report.risk == DeleteRiskDecision::HighRisk {
+                        PreviewSafetyState::Warning
+                    } else {
+                        PreviewSafetyState::Passed
+                    },
+                    summary: Some(format!(
+                        "将永久删除 {} 个目录，不经过回收站。",
+                        report.targets.len()
+                    )),
+                    warnings,
+                },
+                prepared.confirmation_requirement_version.map(|version| {
+                    PreviewConfirmationRequirement {
+                        version,
+                        phrase: "DELETE".to_owned(),
+                    }
+                }),
+                Some(path_fingerprints_hash_hex(&fingerprints)),
+            )
+        } else {
+            (
+                "执行".to_owned(),
+                PreviewSafetyDecision {
+                    state: PreviewSafetyState::NotApplicable,
+                    summary: None,
+                    warnings: Vec::new(),
+                },
+                None,
+                None,
+            )
+        };
+
     Ok(PreviewCommandResponse {
         command_block_id: prepared.definition.id,
         revision: prepared.definition.revision,
@@ -703,12 +1040,10 @@ fn build_preview_response(
         full_size_bytes,
         truncated,
         risk_level: prepared.definition.risk_level,
-        action_label: "执行".to_owned(),
-        safety: PreviewSafetyDecision {
-            state: PreviewSafetyState::NotApplicable,
-            summary: None,
-            warnings: Vec::new(),
-        },
+        action_label,
+        safety,
+        confirmation_requirement,
+        target_identity_hash,
         execution_spec_hash: prepared.execution_spec_hash,
     })
 }
@@ -862,19 +1197,74 @@ mod tests {
     //! Planner 的 Definition、Preview、复验、摘要边界和无副作用 Hash 测试。
 
     use std::collections::BTreeMap;
+    #[cfg(feature = "delete-validation")]
+    use std::fs;
+    #[cfg(feature = "delete-validation")]
+    use std::path::{Path, PathBuf};
 
+    #[cfg(feature = "delete-validation")]
+    use super::{apply_safety_policy_with_protected, validate_safety_confirmation};
     use super::{
         build_preview_response, prepare_execution, ExecutionPlanner, PlannerErrorCode,
         PreviewCommandRequest, PreviewSafetyState, VerifyRunRequest,
     };
+    #[cfg(feature = "delete-validation")]
+    use crate::execution::command::DELETE_FOLDERS_ID;
     use crate::execution::command::{
         builtin_command_definitions, CommandBlockDefinition, CommandOrigin, RiskLevel, RunnerType,
-        CMD_PARAMETER_ECHO_ID, POWERSHELL_PARAMETER_ECHO_ID,
+        SafetyPolicy, CMD_PARAMETER_ECHO_ID, POWERSHELL_PARAMETER_ECHO_ID,
     };
+    #[cfg(feature = "delete-validation")]
+    use crate::execution::manager::ExecutionManager;
     use crate::execution::outcome::{ExitCodeRange, OutcomePolicy};
+    #[cfg(feature = "delete-validation")]
+    use crate::execution::parameter::validate_parameter_values;
     use crate::execution::parameter::{
         ParameterBase, ParameterDefinition, ParameterValue, TextParameterDefinition,
     };
+    #[cfg(feature = "delete-validation")]
+    use crate::execution::safety::{DeleteRiskDecision, ProtectedPathSet};
+    #[cfg(feature = "delete-validation")]
+    use crate::execution::session::ExecutionStartError;
+
+    /// 自动清理且只允许位于 `%TEMP%\CmdBox\spec-*` 的测试目录根。
+    #[cfg(feature = "delete-validation")]
+    struct IsolatedDeleteRoot(PathBuf);
+
+    #[cfg(feature = "delete-validation")]
+    impl IsolatedDeleteRoot {
+        /// 创建当前测试唯一拥有的空目录根。
+        fn create() -> Self {
+            let root = std::env::temp_dir()
+                .join("CmdBox")
+                .join(format!("spec-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&root).expect("应能创建隔离 SPEC 测试根");
+            Self(root)
+        }
+
+        /// 返回隔离根路径。
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    #[cfg(feature = "delete-validation")]
+    impl Drop for IsolatedDeleteRoot {
+        /// 只清理本测试创建且经过固定父目录和 UUID 前缀校验的根。
+        fn drop(&mut self) {
+            let expected_parent = std::env::temp_dir().join("CmdBox");
+            let valid_name = self
+                .0
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("spec-") && name.len() > 20);
+            assert_eq!(self.0.parent(), Some(expected_parent.as_path()));
+            assert!(valid_name, "拒绝清理不符合 SPEC 测试命名的目录");
+            if self.0.exists() {
+                fs::remove_dir_all(&self.0).expect("应能清理隔离 SPEC 测试根");
+            }
+        }
+    }
 
     /// 返回固定 Built-in 参数校验可读取的两个真实目录文本。
     fn existing_folders() -> (String, String) {
@@ -959,16 +1349,38 @@ mod tests {
         );
     }
 
+    /// 验证 destructive 风险不能搭配 Generic 策略，Safety 各版本也不能为零。
+    #[test]
+    fn rejects_mismatched_or_zero_safety_policy() {
+        let mut definition = builtin_command_definitions()[0].clone();
+        definition.risk_level = RiskLevel::Destructive;
+        let error = prepare_execution(definition, &valid_values(true))
+            .err()
+            .expect("destructive 风险不得绕过 DeletePaths Safety Policy");
+        assert_eq!(error.code, PlannerErrorCode::InternalContract);
+        assert_eq!(error.detail_code.as_deref(), Some("invalidSafetyPolicy"));
+
+        let mut definition = builtin_command_definitions()[0].clone();
+        definition.safety_policy = SafetyPolicy::Generic { version: 0 };
+        let error = prepare_execution(definition, &valid_values(true))
+            .err()
+            .expect("Safety Policy 零版本必须拒绝");
+        assert_eq!(error.detail_code.as_deref(), Some("invalidSafetyPolicy"));
+    }
+
     /// 验证 Planner 列表/详情只返回公开字段白名单，并且不会序列化内部模板。
     #[test]
     fn lists_and_gets_public_command_block_dtos_without_template() {
         let planner = ExecutionPlanner::new();
         let summaries = planner.list_command_blocks();
 
-        #[cfg(not(feature = "ui-validation"))]
-        assert_eq!(summaries.len(), 2, "默认 Planner 只能列出两个正式 Built-in");
-        #[cfg(feature = "ui-validation")]
-        assert_eq!(summaries.len(), 5, "显式验证构建应只追加三个 Definition");
+        let expected_count =
+            2 + if cfg!(feature = "ui-validation") {
+                3
+            } else {
+                0
+            } + usize::from(cfg!(feature = "delete-validation"));
+        assert_eq!(summaries.len(), expected_count);
         assert_eq!(summaries[0].id, POWERSHELL_PARAMETER_ECHO_ID);
         let summary_json = serde_json::to_value(&summaries[0]).expect("Summary 应可序列化");
         assert_eq!(
@@ -1129,6 +1541,8 @@ mod tests {
                 expected_revision: 2,
                 parameter_values: BTreeMap::new(),
                 execution_spec_hash: preview.execution_spec_hash.clone(),
+                safety_confirmation: None,
+                target_identity_hash: None,
             })
             .expect_err("旧 revision 应优先拒绝");
         assert_eq!(revision_error.code, PlannerErrorCode::RevisionConflict);
@@ -1144,6 +1558,8 @@ mod tests {
                 expected_revision: 1,
                 parameter_values: changed_values,
                 execution_spec_hash: preview.execution_spec_hash.clone(),
+                safety_confirmation: None,
+                target_identity_hash: None,
             })
             .expect_err("参数变化后的旧 Hash 应拒绝");
         assert_eq!(stale_error.code, PlannerErrorCode::StalePreview);
@@ -1154,6 +1570,8 @@ mod tests {
                 expected_revision: 1,
                 parameter_values: values,
                 execution_spec_hash: preview.execution_spec_hash.clone(),
+                safety_confirmation: None,
+                target_identity_hash: None,
             })
             .expect("当前 revision 与 Hash 应产出 VerifiedExecution");
         let debug = format!("{verified:?}");
@@ -1212,6 +1630,8 @@ mod tests {
                 expected_revision: 1,
                 parameter_values: values,
                 execution_spec_hash: preview.execution_spec_hash,
+                safety_confirmation: None,
+                target_identity_hash: None,
             })
             .expect("CMD Run 应复用同一渲染、绑定与 Hash 路径");
     }
@@ -1250,6 +1670,216 @@ mod tests {
         );
     }
 
+    /// 验证永久删除 Preview 折叠重复/子目录、绑定身份，并在 Executor 接入前拒绝启动授权。
+    #[cfg(feature = "delete-validation")]
+    #[test]
+    fn delete_preview_binds_effective_targets_and_is_not_launch_ready() {
+        let root = IsolatedDeleteRoot::create();
+        let parent = root.path().join("parent");
+        let child = parent.join("child");
+        fs::create_dir_all(&child).expect("应能创建隔离目标层级");
+        let parent_text = parent.to_str().expect("测试路径应为 Unicode").to_owned();
+        let values = BTreeMap::from([(
+            "folders".to_owned(),
+            ParameterValue::Array(vec![
+                ParameterValue::Text(child.to_str().expect("测试路径应为 Unicode").to_owned()),
+                ParameterValue::Text(parent_text.clone()),
+                ParameterValue::Text(parent_text),
+            ]),
+        )]);
+        let planner = ExecutionPlanner::new();
+        let preview = planner
+            .preview(&PreviewCommandRequest {
+                command_block_id: DELETE_FOLDERS_ID.to_owned(),
+                expected_revision: 1,
+                parameter_values: values.clone(),
+            })
+            .expect("隔离目录应生成永久删除 Preview");
+
+        assert_eq!(preview.risk_level, RiskLevel::Destructive);
+        assert_eq!(preview.action_label, "永久删除");
+        assert_eq!(preview.safety.state, PreviewSafetyState::Passed);
+        assert_eq!(preview.parameter_summaries[0].total_count, 1);
+        assert!(preview
+            .safety
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "ANCESTOR_COLLAPSED"));
+        assert!(preview.confirmation_requirement.is_none());
+        let identity_hash = preview
+            .target_identity_hash
+            .clone()
+            .expect("destructive Preview 必须返回目标身份凭据");
+
+        let missing_identity = planner
+            .verify_run(&VerifyRunRequest {
+                command_block_id: DELETE_FOLDERS_ID.to_owned(),
+                expected_revision: 1,
+                parameter_values: values.clone(),
+                execution_spec_hash: preview.execution_spec_hash.clone(),
+                safety_confirmation: None,
+                target_identity_hash: None,
+            })
+            .expect_err("destructive Run 不得省略目标身份凭据");
+        assert_eq!(missing_identity.code, PlannerErrorCode::TargetChanged);
+
+        let verified = planner
+            .verify_run(&VerifyRunRequest {
+                command_block_id: DELETE_FOLDERS_ID.to_owned(),
+                expected_revision: 1,
+                parameter_values: values,
+                execution_spec_hash: preview.execution_spec_hash,
+                safety_confirmation: None,
+                target_identity_hash: Some(identity_hash),
+            })
+            .expect("未变化的隔离目标应通过完整 Run 复验");
+        assert!(!verified.launch_ready());
+        assert!(format!("{verified:?}").contains("collector_protocol_version: Some(1)"));
+        assert!(matches!(
+            ExecutionManager::new().start(verified),
+            Err(ExecutionStartError::ExecutorUnavailable)
+        ));
+        assert!(parent.exists(), "SPEC 原子不得产生删除副作用");
+    }
+
+    /// 验证 Preview 后即使同名目录被重建，Run 也会按 File ID 拒绝目标替换。
+    #[cfg(feature = "delete-validation")]
+    #[test]
+    fn delete_run_rejects_recreated_target_identity() {
+        let root = IsolatedDeleteRoot::create();
+        let target = root.path().join("replace-me");
+        fs::create_dir(&target).expect("应能创建隔离目标");
+        let values = BTreeMap::from([(
+            "folders".to_owned(),
+            ParameterValue::Array(vec![ParameterValue::Text(
+                target.to_str().expect("测试路径应为 Unicode").to_owned(),
+            )]),
+        )]);
+        let planner = ExecutionPlanner::new();
+        let preview = planner
+            .preview(&PreviewCommandRequest {
+                command_block_id: DELETE_FOLDERS_ID.to_owned(),
+                expected_revision: 1,
+                parameter_values: values.clone(),
+            })
+            .expect("原始隔离目标应生成 Preview");
+        fs::remove_dir(&target).expect("只移除当前测试拥有的空目标");
+        fs::create_dir(&target).expect("应能在同一路径重建不同对象");
+
+        let error = planner
+            .verify_run(&VerifyRunRequest {
+                command_block_id: DELETE_FOLDERS_ID.to_owned(),
+                expected_revision: 1,
+                parameter_values: values,
+                execution_spec_hash: preview.execution_spec_hash,
+                safety_confirmation: None,
+                target_identity_hash: preview.target_identity_hash,
+            })
+            .expect_err("同名重建对象必须被身份复验拒绝");
+        assert_eq!(error.code, PlannerErrorCode::TargetChanged);
+        assert!(target.exists(), "身份拒绝不得删除重建目标");
+    }
+
+    /// 验证卷根在 Preview 阶段即被 Safety Guard 阻断，且错误不回显路径。
+    #[cfg(feature = "delete-validation")]
+    #[test]
+    fn delete_preview_blocks_volume_root() {
+        let planner = ExecutionPlanner::new();
+        let error = planner
+            .preview(&PreviewCommandRequest {
+                command_block_id: DELETE_FOLDERS_ID.to_owned(),
+                expected_revision: 1,
+                parameter_values: BTreeMap::from([(
+                    "folders".to_owned(),
+                    ParameterValue::Array(vec![ParameterValue::Text(r"C:\".to_owned())]),
+                )]),
+            })
+            .expect_err("卷根必须被阻断");
+
+        assert_eq!(error.code, PlannerErrorCode::SafetyBlocked);
+        assert_eq!(error.detail_code.as_deref(), Some("criticalPath"));
+        assert!(!error.to_string().contains(r"C:\"));
+    }
+
+    /// 验证 high-risk 精确根产生版本化确认要求，且确认短语必须精确匹配。
+    #[cfg(feature = "delete-validation")]
+    #[test]
+    fn high_risk_policy_requires_exact_confirmation_phrase() {
+        let root = IsolatedDeleteRoot::create();
+        let target = root.path().join("high-risk-root");
+        fs::create_dir(&target).expect("应能创建隔离 high-risk 目标");
+        let definition = builtin_command_definitions()
+            .into_iter()
+            .find(|definition| definition.id == DELETE_FOLDERS_ID)
+            .expect("应存在永久删除 Definition");
+        let values = BTreeMap::from([(
+            "folders".to_owned(),
+            ParameterValue::Array(vec![ParameterValue::Text(
+                target.to_str().expect("测试路径应为 Unicode").to_owned(),
+            )]),
+        )]);
+        let mut normalized = validate_parameter_values(&definition.parameters, &values)
+            .expect("隔离目标应通过类型化校验");
+        let protected = ProtectedPathSet::explicit(Vec::new(), Vec::new(), vec![target]);
+        let (report, confirmation_version, collector_version) =
+            apply_safety_policy_with_protected(&definition, &mut normalized, &protected)
+                .expect("显式 high-risk 根应允许带强化确认的 Preview");
+
+        assert_eq!(
+            report.expect("应返回安全报告").risk,
+            DeleteRiskDecision::HighRisk
+        );
+        assert_eq!(confirmation_version, Some(1));
+        assert_eq!(collector_version, Some(1));
+        validate_safety_confirmation(None, None).expect("normal 执行不要求确认");
+        for response in [
+            None,
+            Some(super::SafetyConfirmationResponse {
+                phrase: "delete".to_owned(),
+            }),
+        ] {
+            let error = validate_safety_confirmation(Some(1), response.as_ref())
+                .expect_err("high-risk 必须提交精确 DELETE");
+            assert_eq!(error.code, PlannerErrorCode::ConfirmationRequired);
+        }
+        validate_safety_confirmation(
+            Some(1),
+            Some(&super::SafetyConfirmationResponse {
+                phrase: "DELETE".to_owned(),
+            }),
+        )
+        .expect("精确 DELETE 应满足当前确认契约");
+        let unknown_version = validate_safety_confirmation(
+            Some(2),
+            Some(&super::SafetyConfirmationResponse {
+                phrase: "DELETE".to_owned(),
+            }),
+        )
+        .expect_err("未知确认版本必须 fail-closed");
+        assert_eq!(unknown_version.code, PlannerErrorCode::InternalContract);
+        assert_eq!(
+            unknown_version.detail_code.as_deref(),
+            Some("unsupportedConfirmationVersion")
+        );
+
+        let mut unsupported_definition = definition;
+        let SafetyPolicy::DeletePaths {
+            confirmation_version,
+            collector_protocol_version,
+            ..
+        } = &mut unsupported_definition.safety_policy
+        else {
+            panic!("永久删除 Definition 必须声明 DeletePaths");
+        };
+        *confirmation_version = 2;
+        *collector_protocol_version = 2;
+        let error = prepare_execution(unsupported_definition, &values)
+            .err()
+            .expect("未实现的确认与 collector 版本不得进入 Spec");
+        assert_eq!(error.code, PlannerErrorCode::InternalContract);
+        assert_eq!(error.detail_code.as_deref(), Some("invalidSafetyPolicy"));
+    }
+
     /// 创建只含一个长 Text 的私有 Definition，用于证明展示截断与完整 Artifact Hash 分离。
     fn long_text_definition() -> CommandBlockDefinition {
         CommandBlockDefinition {
@@ -1276,6 +1906,7 @@ mod tests {
             })],
             environment: BTreeMap::new(),
             outcome_policy: OutcomePolicy::standard(),
+            safety_policy: SafetyPolicy::Generic { version: 1 },
         }
     }
 

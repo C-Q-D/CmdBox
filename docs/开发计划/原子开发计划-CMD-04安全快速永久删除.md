@@ -71,7 +71,7 @@ CMD04-SAFETY-01 → CMD04-SPEC-01 → CMD04-EXECUTOR-01 → CMD04-SESSION-01
 
 ## CMD04-SPEC-01 绑定破坏性 Definition、Safety 与新版 Spec
 
-- 状态：in_progress
+- 状态：done
 - 支持的验收场景：永久删除命令经 feature Registry 读取；Preview 展示完整目标摘要、安全结论和明确动作；Run 二次检查、目标变化与强化确认均由后端裁决。
 - 唯一目标：把 Delete Safety、确认要求和目标身份纳入唯一 Preview/Run Canonical Spec。
 - 当前行为与目标行为：正式 Definition 只有 normal Echo，Spec Schema 不含 Fingerprint；完成后 feature-only Delete Definition 使用 Target Results Policy，Hash 覆盖完整破坏性事实。
@@ -92,9 +92,19 @@ CMD04-SAFETY-01 → CMD04-SPEC-01 → CMD04-EXECUTOR-01 → CMD04-SESSION-01
 - DDD 门禁：提交前限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(core): [CMD04-SPEC-01] 绑定永久删除执行规范`
 
+### 执行记录
+
+- 实际交付：新增仅在 `delete-validation` 注册的永久删除 Built-in、`DeletePaths` Safety Policy 和 Spec Schema 3；Preview/Run 每次重新建立系统保护根、执行根级 Guard，并把折叠后的有序目标路径、Final Path、卷序列号、128-bit File ID、安全判定、确认要求版本、collector 协议版本和 Outcome Policy 版本纳入 Canonical Hash。Run 强制提交独立目标身份凭据，high-risk 仅接受当前 v1 的精确 `DELETE` 响应。
+- 启动门禁：Hash 已验证的 delete 值保留目标 Fingerprint 与 collector 协议版本，但在可信 Executor 完成前 `launchReady=false`；唯一生产 Session 启动边界返回 `EXECUTOR_UNAVAILABLE`，不会创建 Artifact 或进程。默认 Registry 仍只有两个正式 Echo Built-in。
+- 安全收敛：critical tree 与候选目标双向重叠均阻断；critical exact 根及其祖先阻断、其普通子目录仍允许。Risk/Safety 类型错配、零版本和未实现的 Safety/confirmation/collector 版本全部在进入 Spec 前 fail-closed。
+- 实际验证：默认 Rust `101 passed / 1 ignored`，`delete-validation` 为 `106 passed / 1 ignored`，全 feature 为 `107 passed / 1 ignored`，Windows 进程树集成 `1 passed`；前端 `97 passed`、TypeScript、Vite build、契约生成/漂移、format、strict Clippy 和 diff check 通过；`spec-*`、`safety-*` 临时目录残留为 0。
+- 测试边界：本原子没有执行永久删除模板；文件系统测试只创建、重建和清理 `%TEMP%\CmdBox\spec-<UUID>` / `safety-<label>-<UUID>` 隔离目录，并只读检查卷根阻断。
+- 复核结果：首轮 L3 发现 critical 根祖先未阻断、Verified 值丢失 collector 版本和未知确认版本未 fail-closed；修订后第 2 轮限定复核为 `PASS`。
+- 计划偏差：Run/Preview 新增公开字段要求同步生成 TypeScript contract，因此在本原子前置完成对应生成文件；目标结果和完整公开终态契约仍留在 `CMD04-CONTRACT-01`。
+
 ## CMD04-EXECUTOR-01 建立可信逐目标删除协议
 
-- 状态：todo
+- 状态：in_progress
 - 支持的验收场景：隔离目录逐个删除；每个目标在副作用前重新核验；成功、失败、未开始和无法确认来自严格类型化事实；内部链接不能改动外部 sentinel。
 - 唯一目标：建立 fail-closed、可取消且不解析 Output 的 Delete Executor/collector 深模块。
 - 当前行为与目标行为：Session 只管理 stdout/stderr 与 Exit Code；完成后 Delete Verified 值可物化独立 collector lease、认证 handshake 和类型化目标事实。
