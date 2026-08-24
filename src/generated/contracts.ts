@@ -187,6 +187,10 @@ sequence: number,
  */
 exitCode: number,
 /**
+ * Rust Core 按 Command Block Policy 生成的业务结果。
+ */
+outcome: Outcome,
+/**
  * Rust Core 从 Resume 到终态的毫秒数。
  */
 durationMs: number,
@@ -202,6 +206,10 @@ executionId: string,
  * IPC 转发器分配的事件级顺序。
  */
 sequence: number,
+/**
+ * 取消没有自然完成的业务结果，固定为 `none`。
+ */
+outcome: Outcome,
 /**
  * Rust Core 从 Resume 到终态的毫秒数。
  */
@@ -222,6 +230,10 @@ sequence: number,
  * Rust Core 返回的稳定失败说明。
  */
 message: string,
+/**
+ * Core 内部失败不代表命令业务失败，固定为 `none`。
+ */
+outcome: Outcome,
 /**
  * Rust Core 从 Resume 到终态的毫秒数。
  */
@@ -372,6 +384,11 @@ required: boolean,
  * 后续持久化层是否允许记忆该参数；本模块不执行持久化。
  */
 remember: boolean, };
+
+/**
+ * Rust Core 发布给调用方的稳定业务结果。
+ */
+export type Outcome = "none" | "success" | "warning" | "partialFailure" | "failure";
 
 /**
  * 当前 CMD-02 原子支持的六类 Parameter Definition。

@@ -13,6 +13,7 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::execution::manager::{ActiveExecutionState, ExecutionManager};
+use crate::execution::outcome::Outcome;
 use crate::execution::output::{OutputBatch, OutputStream};
 use crate::execution::planner::{
     CommandBlockDetails, CommandBlockSummary, ExecutionPlanner, PlannerError, PlannerErrorCode,
@@ -154,6 +155,8 @@ pub enum ExecutionStreamEvent {
         sequence: u64,
         /// Runner 根进程的原始 Exit Code。
         exit_code: u32,
+        /// Rust Core 按 Command Block Policy 生成的业务结果。
+        outcome: Outcome,
         /// Rust Core 从 Resume 到终态的毫秒数。
         #[cfg_attr(test, ts(type = "number"))]
         duration_ms: u64,
@@ -168,6 +171,8 @@ pub enum ExecutionStreamEvent {
         /// IPC 转发器分配的事件级顺序。
         #[cfg_attr(test, ts(type = "number"))]
         sequence: u64,
+        /// 取消没有自然完成的业务结果，固定为 `none`。
+        outcome: Outcome,
         /// Rust Core 从 Resume 到终态的毫秒数。
         #[cfg_attr(test, ts(type = "number"))]
         duration_ms: u64,
@@ -184,6 +189,8 @@ pub enum ExecutionStreamEvent {
         sequence: u64,
         /// Rust Core 返回的稳定失败说明。
         message: String,
+        /// Core 内部失败不代表命令业务失败，固定为 `none`。
+        outcome: Outcome,
         /// Rust Core 从 Resume 到终态的毫秒数。
         #[cfg_attr(test, ts(type = "number"))]
         duration_ms: u64,
@@ -356,37 +363,40 @@ fn map_event(event: ExecutionEvent, sequence: u64) -> ExecutionStreamEvent {
         ExecutionEvent::Finished {
             execution_id,
             exit_code,
-            outcome: _,
+            outcome,
             duration,
             dropped_output_bytes,
         } => ExecutionStreamEvent::Finished {
             execution_id: execution_id.to_string(),
             sequence,
             exit_code,
+            outcome,
             duration_ms: duration.as_millis() as u64,
             dropped_output_bytes,
         },
         ExecutionEvent::Cancelled {
             execution_id,
-            outcome: _,
+            outcome,
             duration,
             dropped_output_bytes,
         } => ExecutionStreamEvent::Cancelled {
             execution_id: execution_id.to_string(),
             sequence,
+            outcome,
             duration_ms: duration.as_millis() as u64,
             dropped_output_bytes,
         },
         ExecutionEvent::Failed {
             execution_id,
             message,
-            outcome: _,
+            outcome,
             duration,
             dropped_output_bytes,
         } => ExecutionStreamEvent::Failed {
             execution_id: execution_id.to_string(),
             sequence,
             message,
+            outcome,
             duration_ms: duration.as_millis() as u64,
             dropped_output_bytes,
         },
@@ -443,6 +453,7 @@ mod tests {
     use crate::execution::artifact::{ArtifactError, ArtifactOperation};
     use crate::execution::command::{CMD_PARAMETER_ECHO_ID, POWERSHELL_PARAMETER_ECHO_ID};
     use crate::execution::manager::ExecutionManager;
+    use crate::execution::outcome::Outcome;
     use crate::execution::output::{OutputBatch, OutputFragment, OutputStream};
     use crate::execution::parameter::ParameterValue;
     use crate::execution::planner::{
@@ -1036,6 +1047,69 @@ mod tests {
         fs::remove_dir(&second_target).expect("第二测试目标应保持为空并可清理");
         fs::remove_dir(&target_root).expect("测试目标根应保持为空并可清理");
         assert!(!target_root.exists(), "测试结束不得遗留目标目录");
+    }
+
+    /// 验证三种公开终态都精确携带 Rust 生成的必填 Outcome。
+    #[test]
+    fn maps_mandatory_outcome_on_every_terminal_event() {
+        let execution_id = uuid::Uuid::new_v4();
+        let finished = map_event(
+            ExecutionEvent::Finished {
+                execution_id,
+                exit_code: 3,
+                outcome: Outcome::Warning,
+                duration: Duration::from_millis(12),
+                dropped_output_bytes: 0,
+            },
+            4,
+        );
+        let cancelled = map_event(
+            ExecutionEvent::Cancelled {
+                execution_id,
+                outcome: Outcome::None,
+                duration: Duration::from_millis(13),
+                dropped_output_bytes: 0,
+            },
+            5,
+        );
+        let failed = map_event(
+            ExecutionEvent::Failed {
+                execution_id,
+                message: "internal".to_owned(),
+                outcome: Outcome::None,
+                duration: Duration::from_millis(14),
+                dropped_output_bytes: 0,
+            },
+            6,
+        );
+
+        assert!(matches!(
+            finished,
+            ExecutionStreamEvent::Finished {
+                exit_code: 3,
+                outcome: Outcome::Warning,
+                ..
+            }
+        ));
+        assert!(matches!(
+            cancelled,
+            ExecutionStreamEvent::Cancelled {
+                outcome: Outcome::None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            failed,
+            ExecutionStreamEvent::Failed {
+                outcome: Outcome::None,
+                ..
+            }
+        ));
+        for event in [finished, cancelled, failed] {
+            let json = serde_json::to_value(event).expect("终态应可序列化");
+            assert!(json["data"].get("outcome").is_some());
+            assert_no_forbidden_keys(&json);
+        }
     }
 
     /// 验证 CMD Built-in 经相同 Preview、复验、Session 和 IPC 接口安全回显全部边界字符。

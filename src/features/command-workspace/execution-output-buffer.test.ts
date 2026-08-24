@@ -124,6 +124,7 @@ describe("Execution Output Buffer", function describeOutputBuffer() {
           executionId,
           sequence: 2,
           exitCode: 0,
+          outcome: "success",
           durationMs: 10,
           droppedOutputBytes: 0,
         },

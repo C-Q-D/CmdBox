@@ -91,7 +91,7 @@ CMD03-POLICY-01 → CMD03-SESSION-01 → CMD03-CONTRACT-01 → CMD03-UI-01 → C
 
 ## CMD03-CONTRACT-01 发布稳定 Outcome 契约
 
-- 状态：in_progress
+- 状态：done
 - 支持的验收场景：前端经现有 Run Channel 收到 Rust 生成的稳定 Outcome，不增加任意执行入口。
 - 唯一目标：把内部 Outcome 精确发布为 Rust 单一真值生成的 TypeScript Contract。
 - 当前行为与目标行为：公开三种终态没有 Outcome；完成后 `Finished`、`Cancelled`、`Failed` 均有必填 Outcome。
@@ -112,9 +112,15 @@ CMD03-POLICY-01 → CMD03-SESSION-01 → CMD03-CONTRACT-01 → CMD03-UI-01 → C
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(ipc): [CMD03-CONTRACT-01] 发布稳定 Outcome 契约`
 
+### 执行记录
+
+- 实际交付：`Outcome` 由 Rust serde/ts-rs 生成固定五值 union；Finished、Cancelled、Failed 三种公开终态均增加必填字段并完整透传 Session 值。五个业务 IPC、全部请求 DTO 和权限保持不变，Policy、脚本、PID、目标事实及底层错误未跨越边界；前端既有 Fixture 只机械补齐明确值，Workspace 本原子仍不读取该字段。
+- 实际验证：生成前 `contract:check` 按预期报告 `contracts.ts` 漂移，生成后漂移检查通过；TypeScript 初次准确报告 11 处缺失必填字段，补齐后 typecheck、7 个文件 91 项前端测试和 Vite 158 模块生产构建通过。Rust 91 passed、1 ignored，Windows 强退集成 1 passed，format、strict Clippy 与限定 L3 复核均为 `PASS`。
+- 计划偏差：无。
+
 ## CMD03-UI-01 分离展示生命周期与结果
 
-- 状态：pending
+- 状态：in_progress
 - 支持的验收场景：用户能在现有结果卡中分别辨认自然结束/取消/内部失败与业务 Outcome。
 - 唯一目标：让 Workspace 只展示后端 Outcome，并保持既有 `editorial-field-notes` 视觉语法。
 - 当前行为与目标行为：结果卡只显示 Lifecycle 式标题；完成后增加固定 Outcome 标签，同时保留 Exit Code、耗时和丢弃字节。

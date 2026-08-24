@@ -1267,7 +1267,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
       });
       fixture.emit({
         event: "finished",
-        data: { executionId: fixture.executionId, sequence: 2, exitCode: 7, durationMs: 8123, droppedOutputBytes: 0 },
+        data: { executionId: fixture.executionId, sequence: 2, exitCode: 7, outcome: "failure", durationMs: 8123, droppedOutputBytes: 0 },
       });
       fixture.emit({
         event: "output",
@@ -1280,7 +1280,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
       });
       fixture.emit({
         event: "failed",
-        data: { executionId: fixture.executionId, sequence: 4, message: "终态不得覆盖", durationMs: 9000, droppedOutputBytes: 0 },
+        data: { executionId: fixture.executionId, sequence: 4, message: "终态不得覆盖", outcome: "none", durationMs: 9000, droppedOutputBytes: 0 },
       });
     });
 
@@ -1307,7 +1307,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     await startConfirmedExecution();
     await act(async () => {
       fixture.emit({ event: "started", data: { executionId: "11111111-1111-4111-8111-111111111111", sequence: 0 } });
-      fixture.emit({ event: "finished", data: { executionId: "11111111-1111-4111-8111-111111111111", sequence: 1, exitCode: 0, durationMs: 1, droppedOutputBytes: 0 } });
+      fixture.emit({ event: "finished", data: { executionId: "11111111-1111-4111-8111-111111111111", sequence: 1, exitCode: 0, outcome: "success", durationMs: 1, droppedOutputBytes: 0 } });
     });
     expect(screen.queryByText("11111111-1111-4111-8111-111111111111")).toBeNull();
     expect(screen.queryByText("任务自然结束")).toBeNull();
@@ -1435,7 +1435,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
 
     await act(async () => commandFixture.resolveRun());
     await act(async () => commandFixture.emit({ event: "started", data: { executionId: commandFixture.executionId, sequence: 0 } }));
-    await act(async () => commandFixture.emit({ event: "finished", data: { executionId: commandFixture.executionId, sequence: 1, exitCode: 0, durationMs: 10, droppedOutputBytes: 0 } }));
+    await act(async () => commandFixture.emit({ event: "finished", data: { executionId: commandFixture.executionId, sequence: 1, exitCode: 0, outcome: "success", durationMs: 10, droppedOutputBytes: 0 } }));
     await waitFor(() => {
       expect((screen.getByRole("textbox", { name: /文本/ }) as HTMLInputElement).disabled).toBe(false);
       expect((screen.getByRole("button", { name: "添加多个目录" }) as HTMLButtonElement).disabled).toBe(false);
@@ -1463,7 +1463,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     await act(async () => {
       fixture.emit({
         event: "cancelled",
-        data: { executionId: fixture.executionId, sequence: 1, durationMs: 950, droppedOutputBytes: 0 },
+        data: { executionId: fixture.executionId, sequence: 1, outcome: "none", durationMs: 950, droppedOutputBytes: 0 },
       });
     });
     expect(screen.getByText("任务已取消")).toBeDefined();
@@ -1576,6 +1576,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
           executionId: fixture.executionId,
           sequence: 1,
           exitCode: 0,
+          outcome: "success",
           durationMs: 5,
           droppedOutputBytes: 0,
         },
@@ -1614,6 +1615,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
             executionId: fixture.executionId,
             sequence: 101,
             message: "旧 generation 终态",
+            outcome: "none",
             durationMs: 99,
             droppedOutputBytes: 0,
           },
@@ -1661,7 +1663,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     await waitFor(() => expect(screen.getByText(fixture.executionId)).toBeDefined());
     await act(async () => fixture.emit({ event: "started", data: { executionId: fixture.executionId, sequence: 0 } }));
     fireEvent.click(screen.getByRole("button", { name: "终止任务" }));
-    await act(async () => fixture.emit({ event: "cancelled", data: { executionId: fixture.executionId, sequence: 1, durationMs: 50, droppedOutputBytes: 0 } }));
+    await act(async () => fixture.emit({ event: "cancelled", data: { executionId: fixture.executionId, sequence: 1, outcome: "none", durationMs: 50, droppedOutputBytes: 0 } }));
     expect(screen.getByText("任务已取消")).toBeDefined();
 
     await act(async () => fixture.resolveCancel());
@@ -1680,7 +1682,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     await waitFor(() => expect(screen.getByText(fixture.executionId)).toBeDefined());
     await act(async () => fixture.emit({ event: "started", data: { executionId: fixture.executionId, sequence: 0 } }));
     fireEvent.click(screen.getByRole("button", { name: "终止任务" }));
-    await act(async () => fixture.emit({ event: "cancelled", data: { executionId: fixture.executionId, sequence: 1, durationMs: 50, droppedOutputBytes: 0 } }));
+    await act(async () => fixture.emit({ event: "cancelled", data: { executionId: fixture.executionId, sequence: 1, outcome: "none", durationMs: 50, droppedOutputBytes: 0 } }));
     await clickAvailablePreview("重新生成 Preview");
     fireEvent.click(
       await screen.findByRole("button", { name: "执行当前命令" }),
@@ -1796,6 +1798,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
             executionId: fixture.executionId,
             sequence: 3,
             exitCode: 0,
+            outcome: "success",
             durationMs: 3,
             droppedOutputBytes: 0,
           },

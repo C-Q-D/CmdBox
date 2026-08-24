@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 /// Rust Core 发布给调用方的稳定业务结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "contracts.ts"))]
 #[serde(rename_all = "camelCase")]
 pub enum Outcome {
     /// 当前终态没有足够业务事实，或任务没有自然完成。
