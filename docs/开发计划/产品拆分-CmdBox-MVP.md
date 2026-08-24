@@ -95,13 +95,13 @@
 
 ## CMD-03 按 Command Outcome Policy 解释执行结果
 
-- 状态：pending
+- 状态：in_progress
 - 用户或业务价值：用户看到的是命令契约定义的真实结果，而不是把所有非零 Exit Code 一律误报为失败。
 - 参与者：Windows 用户、Command Block 作者。
 - 触发与前置条件：一次性 PowerShell/CMD 任务已经产生 Lifecycle、Exit Code、Cancel 原因和必要的命令结果数据。
-- 预期结果：Rust Core 根据 Command Block 的 `OutcomePolicy` 生成独立于 Lifecycle 的业务 Outcome；普通命令、特殊退出码工具、显式目标级结果和取消都得到稳定解释，并通过最小真实 Tauri 路径呈现。
+- 预期结果：Rust Core 根据 Command Block 的 `OutcomePolicy` 生成独立于 Lifecycle 的业务 Outcome；普通命令、特殊退出码工具和取消通过最小真实 Tauri 路径稳定呈现。本单元同时建立类型化目标结果的聚合规则，但不伪造尚不存在的目标 Executor 或目标事实。
 - 验收场景：分别运行 Exit Code 0 的普通成功命令、非零普通失败命令、具有非零成功/警告码策略的测试命令，以及取消中的命令；确认 Lifecycle、Exit Code 与业务 Outcome 不被混为一个字段，UI 使用稳定结果而不是自行猜测。
-- 来源需求或验收条件：Outcome Policy、Execution State 与 Outcome 分离、Robocopy 特殊退出码；AC-01、AC-06。
+- 来源需求或验收条件：Outcome Policy、Execution State 与 Outcome 分离、Robocopy 特殊退出码；AC-01，以及 AC-06 所需的 Outcome 基础契约。真实目标级 AC-06 证据归 CMD-04。
 - 明确不包含：Hero Delete 的路径安全、History 持久化、Robocopy 产品 UI。
 - 依赖：CMD-01、CMD-02。
 - 风险或假设：不同 Command 的成功语义必须显式配置或由 Built-in 固定，不允许前端按单一规则推断。
@@ -112,7 +112,7 @@
 - 用户或业务价值：用户无需查找和改写命令，即可安全地永久删除多个超大文件夹，并明确知道每个目标的结果。
 - 参与者：Windows 用户。
 - 触发与前置条件：用户在真实 Tauri 界面选择一个或多个绝对目录并完成 Preview；CMD-01、CMD-02、CMD-03 已通过。
-- 预期结果：系统规范化并折叠路径集合，拦截关键路径和不明确 Reparse Point，绑定 Path Fingerprint；Run 二次验证后启动唯一的破坏性 Execution，展示实时输出并返回 Success、Partial Failure 或 Failure。应用仍在运行时取消不暗示回滚，目标级结果区分已确认删除、失败、尚未开始和无法确认；Core 强退在本单元只承诺终止整棵进程树，不承诺重启后恢复结果。
+- 预期结果：系统规范化并折叠路径集合，拦截关键路径和不明确 Reparse Point，绑定 Path Fingerprint；Run 二次验证后启动唯一的破坏性 Execution，由真实删除 Executor 产生类型化目标事实，经 CMD-03 的 Policy 聚合并在真实 Tauri 中展示 Success、Partial Failure 或 Failure。应用仍在运行时取消不暗示回滚，目标级结果区分已确认删除、失败、尚未开始和无法确认；Core 强退在本单元只承诺终止整棵进程树，不承诺重启后恢复结果。
 - 验收场景：通过真实 Tauri 路径对普通多目录完成删除；对磁盘根目录和系统目录阻断；对 Preview 后被替换的目录拒绝；对部分被占用目标返回 Partial Failure；对同一已确认 `executionSpecHash` 的双击和并发 Run 只允许一个外部删除进程；对 A 已删除、B 处理中、C 未开始时 Cancel 以及接近自然退出的 Cancel 竞态，终止整棵进程树并显示当前可证明的目标级结果；Core 强退场景只验收整树清理，并明确不把退出表达为无副作用或自动回滚。重启后的可恢复目标证据由 `CMD-07` 验收。
 - 来源需求或验收条件：Hero Delete、安全评审和性能评审；AC-03、AC-04、AC-05、AC-06、AC-09。
 - 明确不包含：回收站恢复、递归安全扫描、删除链接本身的专用命令、复制和移动 UI。
@@ -174,8 +174,8 @@
 # 下一步
 
 - 最近完成：`CMD-02`；`ATOMIC-CMD-02-001` 的九个原子、自动回归与无副作用真实宿主验收均已完成。
-- 当前状态：等待用户检查 `CMD-02`；当前没有进行中的代码交付单元。
-- 下一推荐单元：`CMD-03`，只有用户明确授权后才进入规划或实现；不根据本计划自动恢复开发。
+- 当前状态：`CMD-03` 已获用户授权并按 `ATOMIC-CMD-03-001` 连续实现；目标级真实事实与 Tauri 证据归 `CMD-04`。
+- 下一推荐单元：当前先完成 `CMD-03`；完成后停止在 `CMD-04` 之前等待用户检查和新授权。
 
 # 计划变更记录
 
