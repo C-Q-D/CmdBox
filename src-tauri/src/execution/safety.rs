@@ -57,6 +57,8 @@ pub(crate) enum DeleteSafetyErrorCode {
     Unavailable,
     /// 输入或 Final Path 命中不可删除的关键根或其受保护子树。
     CriticalPath,
+    /// Preview/Run 已绑定的目标根对象在副作用前发生变化。
+    TargetChanged,
     /// 系统保护路径集合无法完整建立。
     ProtectedPathsUnavailable,
 }
@@ -74,6 +76,7 @@ impl DeleteSafetyErrorCode {
             Self::ReparsePoint => "reparsePoint",
             Self::Unavailable => "unavailable",
             Self::CriticalPath => "criticalPath",
+            Self::TargetChanged => "targetChanged",
             Self::ProtectedPathsUnavailable => "protectedPathsUnavailable",
         }
     }
@@ -334,6 +337,34 @@ pub(crate) fn inspect_delete_targets(
         folded_count,
         risk,
     })
+}
+
+/// 在紧邻单个删除副作用前，按已验证路径重新打开目标根并比较完整对象身份。
+///
+/// 本入口不接受 side channel 路径，也不递归扫描目录；Executor 只能按可信 index 取回
+/// Preview/Run 已绑定的 Fingerprint，再由此路径执行 fresh root check。
+#[allow(dead_code)] // CMD04-SESSION-01 接入 Delete Executor 后由生产链路调用。
+pub(crate) fn revalidate_delete_target(
+    index: usize,
+    expected: &PathFingerprint,
+    protected_paths: &ProtectedPathSet,
+) -> Result<(), DeleteSafetyError> {
+    let actual = inspect_root(index, expected.normalized_path.clone())?;
+    if protected_paths.classify(&actual.normalized_path, &actual.final_path)
+        == PathClassification::Critical
+    {
+        return Err(DeleteSafetyError::target(
+            index,
+            DeleteSafetyErrorCode::CriticalPath,
+        ));
+    }
+    if &actual != expected {
+        return Err(DeleteSafetyError::target(
+            index,
+            DeleteSafetyErrorCode::TargetChanged,
+        ));
+    }
+    Ok(())
 }
 
 /// 规范化 destructive Built-in 接受的 Windows 绝对路径语法。
@@ -662,8 +693,8 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        inspect_delete_targets, is_same_or_descendant, windows_paths_equal, DeleteRiskDecision,
-        DeleteSafetyErrorCode, ProtectedPathSet,
+        inspect_delete_targets, is_same_or_descendant, revalidate_delete_target,
+        windows_paths_equal, DeleteRiskDecision, DeleteSafetyErrorCode, ProtectedPathSet,
     };
 
     /// 创建只属于当前测试的隔离根；测试不会把现有目录作为删除目标。
@@ -813,8 +844,12 @@ mod tests {
             .targets
             .remove(0)
             .fingerprint;
+        revalidate_delete_target(0, &first, &protected).expect("未变化目标应通过紧邻副作用复验");
         fs::remove_dir(&target).expect("只删除当前测试创建的空目标");
         fs::create_dir(&target).expect("应在相同路径重建隔离目标");
+        let changed = revalidate_delete_target(0, &first, &protected)
+            .expect_err("同名重建目标必须被紧邻副作用复验拒绝");
+        assert_eq!(changed.code, DeleteSafetyErrorCode::TargetChanged);
         let second = inspect_delete_targets(&[target.to_string_lossy().into_owned()], &protected)
             .expect("重建后身份检查应成功")
             .targets

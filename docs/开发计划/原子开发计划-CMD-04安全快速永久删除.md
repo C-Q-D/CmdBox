@@ -104,7 +104,7 @@ CMD04-SAFETY-01 → CMD04-SPEC-01 → CMD04-EXECUTOR-01 → CMD04-SESSION-01
 
 ## CMD04-EXECUTOR-01 建立可信逐目标删除协议
 
-- 状态：in_progress
+- 状态：done
 - 支持的验收场景：隔离目录逐个删除；每个目标在副作用前重新核验；成功、失败、未开始和无法确认来自严格类型化事实；内部链接不能改动外部 sentinel。
 - 唯一目标：建立 fail-closed、可取消且不解析 Output 的 Delete Executor/collector 深模块。
 - 当前行为与目标行为：Session 只管理 stdout/stderr 与 Exit Code；完成后 Delete Verified 值可物化独立 collector lease、认证 handshake 和类型化目标事实。
@@ -125,9 +125,19 @@ CMD04-SAFETY-01 → CMD04-SPEC-01 → CMD04-EXECUTOR-01 → CMD04-SESSION-01
 - DDD 门禁：提交前限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(executor): [CMD04-EXECUTOR-01] 建立可信删除目标协议`
 
+### 执行记录
+
+- 实际交付：新增 `delete_executor` 深模块和正式 PowerShell v1 同步协议。Delete Verified 值只能整体转换为 `DeleteExecutionPlan`；计划依次建立单实例本地 Named Pipe、物化 Hash 已绑定脚本、挂起创建并加入 Job、绑定真实 PowerShell PID，随后才允许 Resume。transport 仅携带随机 Pipe 叶子名、一次性 token、generation 和顺序 index，不接受 WebView、Definition 或 stdout/stderr 输入。
+- 安全与取消：每个 `BEGIN` 后重新建立系统保护根并比较完整 `PathFingerprint`，通过后才可写 `APPROVE`；`SUCCESS` 还必须由 Rust 复验目标根为 `NotFound`。Cancel 与完整 `APPROVE` 写入通过共享 gate 线性化，Cancel 返回后不存在在途或后续授权；Connect、Read、Write 均使用可取消 OVERLAPPED I/O、固定 deadline、512-byte 单行和 256 KiB 会话上限。
+- 事实与故障：合法 `FAILURE` 会 ACK 并继续下一 index；客户端 PID、token、generation、index、字段数量、UTF-8、NUL、大小、尾随帧或目标身份任一不匹配都 fail-closed。collector 返回已确认的有序 Success/Failure 事实或稳定错误；取消、未开始和无法确认项的完整保守补齐归下一 `CMD04-SESSION-01` 的 Supervisor 终态聚合。
+- 真实安全证据：真实删除测试完整经过正式 `ExecutionPlanner Preview → VerifyRun → DeleteExecutionPlan` 和生产 Built-in 模板，只允许删除 `%TEMP%\CmdBox\executor-run-<UUID>\target`。目标内 Junction 指向第二个独立、带 marker 的 `%TEMP%\CmdBox\executor-sentinel-<UUID>` 根；删除后 exact target 不存在而 `sentinel/keep.txt` 完整，Artifact 与 Pipe 均无残留。Resume 前身份替换时固定脚本收到 DENY，新旧对象均未删除。
+- 实际验证：默认 Rust `116 passed / 1 ignored`，`delete-validation` 为 `123 passed / 1 ignored`，全 feature 为 `124 passed / 1 ignored`，Windows 进程树集成 `1 passed`；Executor 定向矩阵 `16 passed`；前端 `97 passed`、TypeScript、契约漂移、format、strict Clippy 和 diff check 通过；相关 UUID 临时目录残留为 0。
+- 复核结果：首轮 L3 发现 Cancel/APPROVE 竞态、测试脚本未走生产 Planner、Debug secret、sentinel 边界和负向协议矩阵不足；全部修订后第三轮限定复核为 `PASS`，无残留 P0-P2。
+- 测试边界：除上述严格 marker、父路径、固定叶子名和完整 UUID 四重校验的 exact `target` 外，未运行任何删除命令；协议测试仅创建、重命名和清理测试独占 UUID 目录，不接触项目、用户、系统或业务数据。
+
 ## CMD04-SESSION-01 集成 Single Flight、取消与目标终态
 
-- 状态：todo
+- 状态：in_progress
 - 支持的验收场景：并发双击只启动一个删除 Execution；自然结束、取消、内部失败和握手失败均唯一收敛并释放资源。
 - 唯一目标：把 destructive reservation、collector 生命周期和 Target Results Policy 集成到现有 Session Supervisor。
 - 当前行为与目标行为：Manager 仅按 Execution ID 在 PreparedProcess 后登记；完成后 destructive Hash 在任何启动副作用前 reserve，终态携带完整目标事实。

@@ -17,6 +17,7 @@ use super::artifact::{ArtifactError, MaterializedScript, RenderedScript};
 use super::command::{
     builtin_command_definitions, CommandBlockDefinition, RiskLevel, RunnerType, SafetyPolicy,
 };
+use super::delete_executor::DeleteExecutionPlan;
 use super::parameter::{
     validate_parameter_values, NormalizedParameterValue, NormalizedParameters,
     ParameterValidationError, ParameterValues,
@@ -401,18 +402,36 @@ pub struct VerifiedExecution {
     environment: BTreeMap<String, OsString>,
     /// 与 Hash 中 version 相同、已通过 Definition 校验的结果解释策略。
     outcome_policy: super::outcome::OutcomePolicy,
-    /// 下一原子接入可信 collector 前，destructive Verified 值不得启动外部进程。
-    launch_ready: bool,
-    /// Hash 已绑定的有序删除目标身份；normal Command 为空。
-    path_fingerprints: Vec<PathFingerprint>,
-    /// Hash 已绑定且下一原子必须直接消费的 collector 逻辑协议版本。
-    collector_protocol_version: Option<u32>,
+    /// normal 与 destructive 的互斥授权种类，避免 Option/布尔组合产生非法状态。
+    kind: VerifiedExecutionKind,
+}
+
+/// Hash 复验后的唯一执行种类。
+enum VerifiedExecutionKind {
+    /// 现有普通命令可直接进入标准 Session。
+    Standard,
+    /// 永久删除只能由可信 Delete Executor 消费有序身份与协议版本。
+    Delete {
+        fingerprints: Vec<PathFingerprint>,
+        collector_protocol_version: u32,
+    },
 }
 
 /// 只输出授权值的非敏感结构摘要，不输出 Runner、工作目录或参数原值。
 impl std::fmt::Debug for VerifiedExecution {
     /// 格式化不包含本机路径和参数原值的授权摘要。
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        let (kind, target_count, collector_protocol_version) = match &self.kind {
+            VerifiedExecutionKind::Standard => ("standard", 0, None),
+            VerifiedExecutionKind::Delete {
+                fingerprints,
+                collector_protocol_version,
+            } => (
+                "delete",
+                fingerprints.len(),
+                Some(*collector_protocol_version),
+            ),
+        };
         formatter
             .debug_struct("VerifiedExecution")
             .field("artifact_size", &self.rendered_script.bytes().len())
@@ -421,11 +440,9 @@ impl std::fmt::Debug for VerifiedExecution {
                 "working_directory_bound",
                 &self.working_directory.is_absolute(),
             )
-            .field("target_count", &self.path_fingerprints.len())
-            .field(
-                "collector_protocol_version",
-                &self.collector_protocol_version,
-            )
+            .field("kind", &kind)
+            .field("target_count", &target_count)
+            .field("collector_protocol_version", &collector_protocol_version)
             .finish()
     }
 }
@@ -458,9 +475,44 @@ impl VerifiedExecution {
         ))
     }
 
+    /// 将 destructive 授权值一次性移交给 Delete Executor 深模块。
+    ///
+    /// 普通命令返回原授权值，调用方不能把它误当成删除计划；删除命令的脚本、Runner、
+    /// 工作目录、环境、Outcome Policy、目标身份和 collector 协议版本则在此被整体消费，
+    /// 因而不存在由 Session 或 IPC 重新拼装其中任一字段的旁路。
+    #[allow(dead_code)] // CMD04-SESSION-01 将成为生产调用方；本原子先封闭 Executor 唯一接缝。
+    pub(crate) fn into_delete_execution_plan(self) -> Option<DeleteExecutionPlan> {
+        let VerifiedExecutionKind::Delete {
+            fingerprints,
+            collector_protocol_version,
+        } = &self.kind
+        else {
+            return None;
+        };
+        let fingerprints = fingerprints.clone();
+        let collector_protocol_version = *collector_protocol_version;
+        let Self {
+            rendered_script,
+            resolved_runner,
+            working_directory,
+            environment,
+            outcome_policy,
+            kind: _,
+        } = self;
+        Some(DeleteExecutionPlan::new(
+            rendered_script,
+            resolved_runner,
+            working_directory,
+            environment,
+            outcome_policy,
+            fingerprints,
+            collector_protocol_version,
+        ))
+    }
+
     /// 当前授权值是否已有可信 Executor 可安全启动。
     pub(crate) const fn launch_ready(&self) -> bool {
-        self.launch_ready
+        matches!(self.kind, VerifiedExecutionKind::Standard)
     }
 }
 
@@ -497,9 +549,7 @@ pub(crate) fn verified_windows_powershell_with_policy_for_test(
         working_directory,
         environment: BTreeMap::new(),
         outcome_policy,
-        launch_ready: true,
-        path_fingerprints: Vec::new(),
-        collector_protocol_version: None,
+        kind: VerifiedExecutionKind::Standard,
     }
 }
 
@@ -613,24 +663,33 @@ impl ExecutionPlanner {
             ));
         }
 
+        let kind = match prepared.safety_report {
+            None => VerifiedExecutionKind::Standard,
+            Some(report) => {
+                let Some(collector_protocol_version) = prepared.collector_protocol_version else {
+                    return Err(PlannerError::new(
+                        PlannerErrorCode::InternalContract,
+                        None,
+                        Some("deleteCollectorProtocolMissing".to_owned()),
+                    ));
+                };
+                VerifiedExecutionKind::Delete {
+                    fingerprints: report
+                        .targets
+                        .into_iter()
+                        .map(|target| target.fingerprint)
+                        .collect(),
+                    collector_protocol_version,
+                }
+            }
+        };
         Ok(VerifiedExecution {
             rendered_script: prepared.rendered.artifact,
             resolved_runner: prepared.resolved_runner,
             working_directory: prepared.working_directory,
             environment: prepared.environment,
             outcome_policy: prepared.definition.outcome_policy,
-            launch_ready: prepared.safety_report.is_none(),
-            path_fingerprints: prepared
-                .safety_report
-                .map(|report| {
-                    report
-                        .targets
-                        .into_iter()
-                        .map(|target| target.fingerprint)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            collector_protocol_version: prepared.collector_protocol_version,
+            kind,
         })
     }
 }
@@ -890,6 +949,7 @@ fn apply_safety_policy_with_protected(
             DeleteSafetyErrorCode::CriticalPath
             | DeleteSafetyErrorCode::ReparsePoint
             | DeleteSafetyErrorCode::DangerousNamespace => PlannerErrorCode::SafetyBlocked,
+            DeleteSafetyErrorCode::TargetChanged => PlannerErrorCode::TargetChanged,
             _ => PlannerErrorCode::ValidationFailed,
         };
         PlannerError::new(
@@ -1670,7 +1730,7 @@ mod tests {
         );
     }
 
-    /// 验证永久删除 Preview 折叠重复/子目录、绑定身份，并在 Executor 接入前拒绝启动授权。
+    /// 验证永久删除 Preview 折叠重复/子目录、绑定身份，只能转换为 Delete Executor 计划。
     #[cfg(feature = "delete-validation")]
     #[test]
     fn delete_preview_binds_effective_targets_and_is_not_launch_ready() {
@@ -1727,10 +1787,10 @@ mod tests {
             .verify_run(&VerifyRunRequest {
                 command_block_id: DELETE_FOLDERS_ID.to_owned(),
                 expected_revision: 1,
-                parameter_values: values,
-                execution_spec_hash: preview.execution_spec_hash,
+                parameter_values: values.clone(),
+                execution_spec_hash: preview.execution_spec_hash.clone(),
                 safety_confirmation: None,
-                target_identity_hash: Some(identity_hash),
+                target_identity_hash: Some(identity_hash.clone()),
             })
             .expect("未变化的隔离目标应通过完整 Run 复验");
         assert!(!verified.launch_ready());
@@ -1739,7 +1799,21 @@ mod tests {
             ExecutionManager::new().start(verified),
             Err(ExecutionStartError::ExecutorUnavailable)
         ));
-        assert!(parent.exists(), "SPEC 原子不得产生删除副作用");
+        let delete_verified = planner
+            .verify_run(&VerifyRunRequest {
+                command_block_id: DELETE_FOLDERS_ID.to_owned(),
+                expected_revision: 1,
+                parameter_values: values,
+                execution_spec_hash: preview.execution_spec_hash,
+                safety_confirmation: None,
+                target_identity_hash: Some(identity_hash),
+            })
+            .expect("相同授权应可再次由 Planner 全量复验");
+        assert!(
+            delete_verified.into_delete_execution_plan().is_some(),
+            "删除授权只能整体转换为 Delete Executor 计划"
+        );
+        assert!(parent.exists(), "仅转换执行计划不得产生删除副作用");
     }
 
     /// 验证 Preview 后即使同名目录被重建，Run 也会按 File ID 拒绝目标替换。

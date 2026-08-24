@@ -160,7 +160,6 @@ pub struct ResolvedRunner {
 }
 
 /// 字段私有、已绑定受管脚本租约与完整 Win32 启动参数的进程启动值。
-#[derive(Debug)]
 pub struct ProcessLaunch {
     /// CreateProcessW 使用的确定性绝对可执行文件路径。
     executable: PathBuf,
@@ -174,6 +173,29 @@ pub struct ProcessLaunch {
     environment: ProcessLaunchEnvironment,
     /// 保持临时脚本及其唯一目录到受管进程生命周期结束的 RAII 租约。
     materialized_script: MaterializedScript,
+}
+
+/// 启动值可能包含临时脚本路径、工作目录以及 Delete Executor 的 Pipe/token/generation；
+/// Debug 只能给出结构摘要，供上层派生 Debug 安全复用。
+impl std::fmt::Debug for ProcessLaunch {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        let environment_mode = match &self.environment {
+            ProcessLaunchEnvironment::Inherit => "inherit",
+            ProcessLaunchEnvironment::Replace(_) => "replace",
+        };
+        formatter
+            .debug_struct("ProcessLaunch")
+            .field("executable_bound", &self.executable.is_absolute())
+            .field("argument_count", &self.arguments.len())
+            .field("raw_command_tail_bound", &self.raw_command_tail.is_some())
+            .field(
+                "working_directory_bound",
+                &self.working_directory.is_absolute(),
+            )
+            .field("environment_mode", &environment_mode)
+            .field("artifact_bound", &true)
+            .finish()
+    }
 }
 
 impl WindowsPowerShellRunner {
@@ -307,7 +329,24 @@ impl ResolvedRunner {
         self,
         materialized_script: MaterializedScript,
         working_directory: &Path,
+        environment_overrides: BTreeMap<String, OsString>,
+    ) -> ProcessLaunch {
+        self.process_launch_with_environment_and_arguments(
+            materialized_script,
+            working_directory,
+            environment_overrides,
+            Vec::new(),
+        )
+    }
+
+    /// 绑定不属于业务 Spec 的可信 launch-local 参数；当前只供 Delete Executor 传递随机
+    /// named-pipe、认证 token 与 generation，参数值不能来自 WebView 或 Command Definition。
+    pub(crate) fn process_launch_with_environment_and_arguments(
+        self,
+        materialized_script: MaterializedScript,
+        working_directory: &Path,
         mut environment_overrides: BTreeMap<String, OsString>,
+        launch_local_arguments: Vec<OsString>,
     ) -> ProcessLaunch {
         for (name, value) in &self.fixed_environment {
             environment_overrides.insert(name.clone(), value.clone());
@@ -316,9 +355,14 @@ impl ResolvedRunner {
             ScriptPathBinding::Argument => {
                 let mut arguments = self.fixed_arguments.clone();
                 arguments.push(materialized_script.script_path().as_os_str().to_owned());
+                arguments.extend(launch_local_arguments);
                 arguments
             }
             ScriptPathBinding::Environment(name) => {
+                debug_assert!(
+                    launch_local_arguments.is_empty(),
+                    "CMD 当前没有 launch-local 参数契约"
+                );
                 environment_overrides.insert(
                     name.to_owned(),
                     materialized_script.script_path().as_os_str().to_owned(),
@@ -533,6 +577,41 @@ mod tests {
             ]
         );
         assert_eq!(launch.raw_command_tail(), None);
+        assert_eq!(launch.environment(), &ProcessLaunchEnvironment::Inherit);
+    }
+
+    /// 验证 Executor 的运行期随机参数只能追加在 PowerShell `-File <script>` 之后，
+    /// 不改变固定 Runner 选项、脚本身份或继承环境契约。
+    #[test]
+    fn appends_trusted_launch_local_arguments_after_powershell_script() {
+        let runner = WindowsPowerShellRunner::resolve().expect("系统应提供 Windows PowerShell");
+        let fixed_arguments = runner.fixed_arguments().to_vec();
+        let artifact = MaterializedScript::create(RenderedScript::windows_powershell("exit 0"))
+            .expect("应创建测试脚本");
+        let script_path = artifact.script_path().as_os_str().to_owned();
+        let launch_local = ["pipe-leaf", "token", "generation"].map(OsString::from);
+        let launch = runner.process_launch_with_environment_and_arguments(
+            artifact,
+            &std::env::temp_dir(),
+            std::collections::BTreeMap::new(),
+            launch_local.to_vec(),
+        );
+
+        let debug = format!("{launch:?}");
+        assert!(!debug.contains("pipe-leaf"));
+        assert!(!debug.contains("token"));
+        assert!(!debug.contains("generation"));
+        assert!(!debug.contains(&script_path.to_string_lossy().into_owned()));
+        assert!(!debug.contains(&std::env::temp_dir().to_string_lossy().into_owned()));
+
+        let mut expected = fixed_arguments.clone();
+        expected.push(script_path);
+        expected.extend(launch_local);
+        assert_eq!(launch.arguments(), expected);
+        assert_eq!(
+            &launch.arguments()[..fixed_arguments.len()],
+            fixed_arguments.as_slice()
+        );
         assert_eq!(launch.environment(), &ProcessLaunchEnvironment::Inherit);
     }
 

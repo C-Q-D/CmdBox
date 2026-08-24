@@ -49,7 +49,61 @@ const CMD_PARAMETER_ECHO_TEMPLATE: &str = "echo({{text}}\r\necho({{count}}\r\n{{
 
 /// 永久删除固定模板；Session 在可信 Executor 原子完成前拒绝启动该执行种类。
 #[cfg(feature = "delete-validation")]
-const DELETE_FOLDERS_TEMPLATE: &str = "$ErrorActionPreference = 'Stop'\n$failed = 0\n{{#each folders}}try {\n  Remove-Item -LiteralPath {{this}} -Recurse -Force -ErrorAction Stop\n} catch {\n  $failed++\n}\n{{/each}}if ($failed -gt 0) { exit 1 }\nexit 0";
+const DELETE_FOLDERS_TEMPLATE: &str = r#"param(
+  [Parameter(Mandatory = $true)][string]$CmdBoxPipe,
+  [Parameter(Mandatory = $true)][string]$CmdBoxToken,
+  [Parameter(Mandatory = $true)][string]$CmdBoxGeneration
+)
+$ErrorActionPreference = 'Stop'
+$pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', $CmdBoxPipe, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
+try {
+  $pipe.Connect(5000)
+  $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+  $reader = [System.IO.StreamReader]::new($pipe, $utf8, $false, 1024, $true)
+  $writer = [System.IO.StreamWriter]::new($pipe, $utf8, 1024, $true)
+  $writer.NewLine = "`n"
+  $writer.AutoFlush = $true
+  $ioTimeoutMs = 5000
+  function Write-CmdBoxLine([string]$line) {
+    if ($utf8.GetByteCount($line) -gt 512) { throw 'CmdBox collector request exceeds protocol limit.' }
+    $task = $writer.WriteLineAsync($line)
+    if (-not $task.Wait($ioTimeoutMs)) { throw 'CmdBox collector write timeout.' }
+    $task.GetAwaiter().GetResult()
+  }
+  function Read-CmdBoxLine {
+    $task = $reader.ReadLineAsync()
+    if (-not $task.Wait($ioTimeoutMs)) { throw 'CmdBox collector read timeout.' }
+    $line = $task.GetAwaiter().GetResult()
+    if ($null -eq $line -or $utf8.GetByteCount($line) -gt 512) { throw 'CmdBox collector response is invalid.' }
+    return $line
+  }
+  $index = 0
+  $failed = 0
+{{#each folders}}  Write-CmdBoxLine (('BEGIN|{0}|{1}|{2}' -f $CmdBoxToken, $CmdBoxGeneration, $index))
+  $approval = Read-CmdBoxLine
+  if ($approval -ne ('APPROVE|{0}|{1}|{2}' -f $CmdBoxToken, $CmdBoxGeneration, $index)) { exit 70 }
+  try {
+    Remove-Item -LiteralPath {{this}} -Recurse -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath {{this}}) {
+      Write-CmdBoxLine (('FAILURE|{0}|{1}|{2}|stillExists' -f $CmdBoxToken, $CmdBoxGeneration, $index))
+      $failed++
+    } else {
+      Write-CmdBoxLine (('SUCCESS|{0}|{1}|{2}' -f $CmdBoxToken, $CmdBoxGeneration, $index))
+    }
+  } catch {
+    Write-CmdBoxLine (('FAILURE|{0}|{1}|{2}|removeFailed' -f $CmdBoxToken, $CmdBoxGeneration, $index))
+    $failed++
+  }
+  $ack = Read-CmdBoxLine
+  if ($ack -ne ('ACK|{0}|{1}|{2}' -f $CmdBoxToken, $CmdBoxGeneration, $index)) { exit 71 }
+  $index++
+{{/each}}  if ($failed -gt 0) { exit 1 }
+  exit 0
+} finally {
+  if ($null -ne $writer) { $writer.Dispose() }
+  if ($null -ne $reader) { $reader.Dispose() }
+  $pipe.Dispose()
+}"#;
 
 /// Command Definition 声明的结构化 Safety Policy。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

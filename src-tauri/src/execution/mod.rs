@@ -26,6 +26,10 @@ pub mod parameter;
 #[cfg(windows)]
 pub mod safety;
 
+/// Windows 永久删除 Executor 使用的可信 Named Pipe 授权与逐目标事实收集器。
+#[cfg(windows)]
+pub mod delete_executor;
+
 /// Command Block Definition、可信 Preview 与 Run 复验的唯一业务入口。
 pub mod planner;
 
