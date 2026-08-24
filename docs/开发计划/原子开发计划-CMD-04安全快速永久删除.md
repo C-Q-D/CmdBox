@@ -40,7 +40,7 @@ CMD04-SAFETY-01 → CMD04-SPEC-01 → CMD04-EXECUTOR-01 → CMD04-SESSION-01
 
 ## CMD04-SAFETY-01 建立 Windows 目标根安全与身份模型
 
-- 状态：in_progress
+- 状态：done
 - 支持的验收场景：普通目录可 Preview；不存在、文件、危险 Namespace、卷根、UNC Share 根、系统关键目录和顶层 Reparse Point 被拒绝；高风险用户目录被准确分级；重复项与子目录被折叠。
 - 唯一目标：建立只读取目标根、可在 Preview/Run/逐目标授权复用的 `DeletePathsSafetyGuard` 深模块。
 - 当前行为与目标行为：Folders 参数只有词法规范化和基础目录元数据；完成后 Safety Guard 返回规范化目标集、Final Path、稳定 128-bit 身份、风险级别、折叠事实和稳定错误码。
@@ -61,9 +61,17 @@ CMD04-SAFETY-01 → CMD04-SPEC-01 → CMD04-EXECUTOR-01 → CMD04-SESSION-01
 - DDD 门禁：提交前限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(safety): [CMD04-SAFETY-01] 建立目标根安全身份`
 
+### 执行记录
+
+- 实际交付：新增只检查目标根的 Windows Safety 深模块；使用不跟随顶层 Reparse Point 的目录 Handle 读取属性、DOS Final Path、卷序列号和 128-bit File ID；通过 Windows ordinal ignore-case 完成去重与祖先折叠；由 System、Known Folder 和 Tauri App Data 接缝建立 critical tree、Profile exact 与用户 high-risk exact 分级。危险 Device Namespace 同时按规范化分隔符文本和 Windows Prefix kind 拒绝，Final Path Extended 前缀全程按原始 UTF-16 处理。
+- 实际验证：Safety 9 项全部通过，覆盖目录重建身份变化、DOS/UNC/Extended UNC 根、反斜杠/正斜杠 Device Namespace、顶层 Junction、内部 Junction 与深层内容不递归扫描、保护根分级、重复和父子折叠；完整 Rust 为 100 passed、1 ignored，前端 97 passed，strict Clippy、format、diff check 通过，`safety-*` 临时目录残留为 0。
+- 安全边界：测试只创建和清理 `%TEMP%\CmdBox\safety-<label>-<UUID>`；一次无权限 Symlink 夹具失败遗留的空测试根在验证 UUID 与 Temp 边界后清理。当前模块未接入 Planner、默认 Registry 或任何 UI 删除入口，不产生删除业务副作用。
+- 复核结果：首轮 L3 发现替代分隔符 Namespace、lossy UTF-16、panic 清理和测试证据不足；修订后第 2 轮限定复核为 `PASS`。
+- 计划偏差：为兼容当前未提权 Windows 测试环境，顶层 Reparse Point 夹具使用不要求 Symlink 特权的本地 Junction；被测 Windows 属性和产品安全语义不变。
+
 ## CMD04-SPEC-01 绑定破坏性 Definition、Safety 与新版 Spec
 
-- 状态：todo
+- 状态：in_progress
 - 支持的验收场景：永久删除命令经 feature Registry 读取；Preview 展示完整目标摘要、安全结论和明确动作；Run 二次检查、目标变化与强化确认均由后端裁决。
 - 唯一目标：把 Delete Safety、确认要求和目标身份纳入唯一 Preview/Run Canonical Spec。
 - 当前行为与目标行为：正式 Definition 只有 normal Echo，Spec Schema 不含 Fingerprint；完成后 feature-only Delete Definition 使用 Target Results Policy，Hash 覆盖完整破坏性事实。

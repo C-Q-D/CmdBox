@@ -22,6 +22,10 @@ pub mod outcome;
 /// 六类 Parameter Definition、结构化输入校验与确定性规范化。
 pub mod parameter;
 
+/// Windows 破坏性目录操作共用的目标根安全、保护路径与对象身份。
+#[cfg(windows)]
+pub mod safety;
+
 /// Command Block Definition、可信 Preview 与 Run 复验的唯一业务入口。
 pub mod planner;
 
