@@ -16,6 +16,9 @@ pub mod manager;
 /// stdout/stderr 快速 Drain、增量解码与有界 Batch。
 pub mod output;
 
+/// 版本化 Command Outcome Policy 与类型化业务结果解释。
+pub mod outcome;
+
 /// 六类 Parameter Definition、结构化输入校验与确定性规范化。
 pub mod parameter;
 

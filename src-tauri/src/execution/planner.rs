@@ -34,9 +34,6 @@ const EXECUTION_SPEC_SCHEMA_VERSION: u32 = 2;
 /// 当前两个 normal Built-in 使用的不适用 Safety Policy 语义版本。
 const NORMAL_SAFETY_POLICY_VERSION: u32 = 1;
 
-/// 当前普通退出码 Outcome Policy 的语义版本。
-const DEFAULT_OUTCOME_POLICY_VERSION: u32 = 1;
-
 /// 单个参数摘要最多返回的可读值数量。
 const PARAMETER_SUMMARY_MAX_VALUES: usize = 5;
 
@@ -528,6 +525,20 @@ fn prepare_execution(
     definition: CommandBlockDefinition,
     parameter_values: &ParameterValues,
 ) -> Result<PreparedExecution, PlannerError> {
+    definition.outcome_policy.validate().map_err(|error| {
+        let detail_code = match error {
+            super::outcome::OutcomePolicyError::ZeroVersion => "outcomePolicyZeroVersion",
+            super::outcome::OutcomePolicyError::InvalidRange => "outcomePolicyInvalidRange",
+            super::outcome::OutcomePolicyError::OverlappingRanges => {
+                "outcomePolicyOverlappingRanges"
+            }
+        };
+        PlannerError::new(
+            PlannerErrorCode::InternalContract,
+            None,
+            Some(detail_code.to_owned()),
+        )
+    })?;
     let normalized_parameters = validate_parameter_values(&definition.parameters, parameter_values)
         .map_err(planner_parameter_error)?;
     let ast = parse_template(&definition.template, &definition.parameters)
@@ -593,7 +604,7 @@ fn prepare_execution(
         explicit_environment: explicit_environment.clone(),
         internal_environment,
         safety_policy_version: NORMAL_SAFETY_POLICY_VERSION,
-        outcome_policy_version: DEFAULT_OUTCOME_POLICY_VERSION,
+        outcome_policy_version: definition.outcome_policy.version(),
     }
     .hash_hex();
 
@@ -833,6 +844,7 @@ mod tests {
         builtin_command_definitions, CommandBlockDefinition, CommandOrigin, RiskLevel, RunnerType,
         CMD_PARAMETER_ECHO_ID, POWERSHELL_PARAMETER_ECHO_ID,
     };
+    use crate::execution::outcome::{ExitCodeRange, OutcomePolicy};
     use crate::execution::parameter::{
         ParameterBase, ParameterDefinition, ParameterValue, TextParameterDefinition,
     };
@@ -882,6 +894,44 @@ mod tests {
         }
     }
 
+    /// 验证 Definition 的 Outcome Policy version 变化会使完整 Execution Spec Hash 变化。
+    #[test]
+    fn outcome_policy_version_changes_execution_spec_hash() {
+        let definition = builtin_command_definitions()
+            .into_iter()
+            .find(|definition| definition.id == POWERSHELL_PARAMETER_ECHO_ID)
+            .expect("PowerShell Built-in 应存在");
+        let first = prepare_execution(definition.clone(), &valid_values(true))
+            .expect("基线 Definition 应可准备");
+        let mut changed = definition;
+        changed.outcome_policy =
+            OutcomePolicy::exit_code(2, vec![ExitCodeRange { start: 0, end: 0 }], Vec::new());
+        let second = prepare_execution(changed, &valid_values(true))
+            .expect("只改变合法 Policy version 后仍应可准备");
+
+        assert_ne!(first.execution_spec_hash, second.execution_spec_hash);
+    }
+
+    /// 验证非法固定 Policy 在模板渲染前收敛为稳定内部契约错误。
+    #[test]
+    fn rejects_invalid_outcome_policy_as_internal_contract() {
+        let mut definition = builtin_command_definitions()
+            .into_iter()
+            .find(|definition| definition.id == POWERSHELL_PARAMETER_ECHO_ID)
+            .expect("PowerShell Built-in 应存在");
+        definition.outcome_policy = OutcomePolicy::target_results(0);
+
+        let error = prepare_execution(definition, &valid_values(true))
+            .err()
+            .expect("零版本 Policy 应在准备执行时被拒绝");
+
+        assert_eq!(error.code, PlannerErrorCode::InternalContract);
+        assert_eq!(
+            error.detail_code.as_deref(),
+            Some("outcomePolicyZeroVersion")
+        );
+    }
+
     /// 验证 Planner 列表/详情只返回公开字段白名单，并且不会序列化内部模板。
     #[test]
     fn lists_and_gets_public_command_block_dtos_without_template() {
@@ -891,7 +941,7 @@ mod tests {
         #[cfg(not(feature = "ui-validation"))]
         assert_eq!(summaries.len(), 2, "默认 Planner 只能列出两个正式 Built-in");
         #[cfg(feature = "ui-validation")]
-        assert_eq!(summaries.len(), 3, "显式验证构建应只追加一个 Definition");
+        assert_eq!(summaries.len(), 5, "显式验证构建应只追加三个 Definition");
         assert_eq!(summaries[0].id, POWERSHELL_PARAMETER_ECHO_ID);
         let summary_json = serde_json::to_value(&summaries[0]).expect("Summary 应可序列化");
         assert_eq!(
@@ -1198,6 +1248,7 @@ mod tests {
                 placeholder: None,
             })],
             environment: BTreeMap::new(),
+            outcome_policy: OutcomePolicy::standard(),
         }
     }
 

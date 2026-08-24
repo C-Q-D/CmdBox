@@ -1,14 +1,18 @@
 //! CMD-02 使用的固定无破坏 Command Block Definition。
 //!
 //! 本模块声明 PowerShell 与 CMD 参数回显 Built-in 的稳定身份、Runner、正常风险级别、
-//! 类型化参数和受限模板。只有显式 `ui-validation` 构建会额外编译一个无参数短等待
-//! Definition；默认应用仍严格只有两个正式 Built-in。Definition 不包含可执行文件、Runner
-//! options 或已经渲染的脚本，也不会在构造时创建文件或进程。
+//! 类型化参数和受限模板。只有显式 `ui-validation` 构建会额外编译短等待、普通非零和
+//! 特殊 Exit Code 三个安全验证 Definition；默认应用仍严格只有两个正式 Built-in。
+//! Definition 不包含可执行文件、Runner options 或已经渲染的脚本，也不会在构造时创建
+//! 文件或进程。
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "ui-validation")]
+use super::outcome::ExitCodeRange;
+use super::outcome::OutcomePolicy;
 use super::parameter::{
     BooleanParameterDefinition, FolderParameterDefinition, FoldersParameterDefinition,
     NumberParameterDefinition, ParameterBase, ParameterDefinition, SelectParameterDefinition,
@@ -25,6 +29,14 @@ pub const CMD_PARAMETER_ECHO_ID: &str = "builtin.parameter-echo.cmd";
 #[cfg(feature = "ui-validation")]
 pub const UI_VALIDATION_SHORT_WAIT_ID: &str = "builtin.ui-validation.short-wait";
 
+/// 显式真实宿主验收构建使用的普通非零失败 Definition ID。
+#[cfg(feature = "ui-validation")]
+pub const UI_VALIDATION_ORDINARY_FAILURE_ID: &str = "builtin.ui-validation.ordinary-failure";
+
+/// 显式真实宿主验收构建使用的特殊 Exit Code Definition ID。
+#[cfg(feature = "ui-validation")]
+pub const UI_VALIDATION_SPECIAL_EXIT_ID: &str = "builtin.ui-validation.special-exit";
+
 /// PowerShell 参数回显使用的受限静态模板。
 const POWERSHELL_PARAMETER_ECHO_TEMPLATE: &str = "$ErrorActionPreference = 'Stop'\nWrite-Output {{text}}\nWrite-Output {{count}}\n{{#if enabled}}Write-Output 'enabled'\n{{/if}}Write-Output {{mode}}\nWrite-Output {{folder}}\n{{#each folders}}Write-Output {{this}}\n{{/each}}";
 
@@ -34,6 +46,14 @@ const CMD_PARAMETER_ECHO_TEMPLATE: &str = "echo({{text}}\r\necho({{count}}\r\n{{
 /// 显式真实宿主验收使用的固定五秒 PowerShell 短等待模板。
 #[cfg(feature = "ui-validation")]
 const UI_VALIDATION_SHORT_WAIT_TEMPLATE: &str = "Start-Sleep -Seconds 5";
+
+/// 显式真实宿主验收使用的固定普通失败模板。
+#[cfg(feature = "ui-validation")]
+const UI_VALIDATION_ORDINARY_FAILURE_TEMPLATE: &str = "exit 9";
+
+/// 显式真实宿主验收使用的参数化特殊 Exit Code 模板。
+#[cfg(feature = "ui-validation")]
+const UI_VALIDATION_SPECIAL_EXIT_TEMPLATE: &str = "exit {{exitCode}}";
 
 /// Command Block 的来源身份。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +115,8 @@ pub(crate) struct CommandBlockDefinition {
     pub parameters: Vec<ParameterDefinition>,
     /// Runner 继承环境之外由 Definition 明确声明的非敏感环境变量。
     pub environment: BTreeMap<String, String>,
+    /// Rust Core 用于解释自然终态或类型化目标事实的版本化策略。
+    pub(crate) outcome_policy: OutcomePolicy,
 }
 
 /// 按稳定顺序返回正式 Built-in，并仅在显式验证 feature 下追加短等待 Definition。
@@ -111,6 +133,7 @@ pub(crate) fn builtin_command_definitions() -> Vec<CommandBlockDefinition> {
             template: POWERSHELL_PARAMETER_ECHO_TEMPLATE.to_owned(),
             parameters: echo_parameter_definitions(),
             environment: BTreeMap::new(),
+            outcome_policy: OutcomePolicy::standard(),
         },
         CommandBlockDefinition {
             id: CMD_PARAMETER_ECHO_ID.to_owned(),
@@ -123,12 +146,15 @@ pub(crate) fn builtin_command_definitions() -> Vec<CommandBlockDefinition> {
             template: CMD_PARAMETER_ECHO_TEMPLATE.to_owned(),
             parameters: echo_parameter_definitions(),
             environment: BTreeMap::new(),
+            outcome_policy: OutcomePolicy::standard(),
         },
     ];
     #[cfg(feature = "ui-validation")]
     let definitions = {
         let mut definitions = definitions;
         definitions.push(ui_validation_short_wait_definition());
+        definitions.push(ui_validation_ordinary_failure_definition());
+        definitions.push(ui_validation_special_exit_definition());
         definitions
     };
     definitions
@@ -148,6 +174,51 @@ fn ui_validation_short_wait_definition() -> CommandBlockDefinition {
         template: UI_VALIDATION_SHORT_WAIT_TEMPLATE.to_owned(),
         parameters: Vec::new(),
         environment: BTreeMap::new(),
+        outcome_policy: OutcomePolicy::standard(),
+    }
+}
+
+/// 创建只存在于显式验证构建的普通非零失败 Definition。
+#[cfg(feature = "ui-validation")]
+fn ui_validation_ordinary_failure_definition() -> CommandBlockDefinition {
+    CommandBlockDefinition {
+        id: UI_VALIDATION_ORDINARY_FAILURE_ID.to_owned(),
+        name: "验证：普通失败".to_owned(),
+        description: "用于真实宿主普通非零失败 Outcome 验收。".to_owned(),
+        origin: CommandOrigin::Builtin,
+        runner: RunnerType::WindowsPowerShell,
+        risk_level: RiskLevel::Normal,
+        revision: 1,
+        template: UI_VALIDATION_ORDINARY_FAILURE_TEMPLATE.to_owned(),
+        parameters: Vec::new(),
+        environment: BTreeMap::new(),
+        outcome_policy: OutcomePolicy::standard(),
+    }
+}
+
+/// 创建只存在于显式验证构建的特殊非零成功与警告 Definition。
+#[cfg(feature = "ui-validation")]
+fn ui_validation_special_exit_definition() -> CommandBlockDefinition {
+    CommandBlockDefinition {
+        id: UI_VALIDATION_SPECIAL_EXIT_ID.to_owned(),
+        name: "验证：特殊退出码".to_owned(),
+        description: "用于真实宿主非零成功、警告与失败 Outcome 验收。".to_owned(),
+        origin: CommandOrigin::Builtin,
+        runner: RunnerType::WindowsPowerShell,
+        risk_level: RiskLevel::Normal,
+        revision: 1,
+        template: UI_VALIDATION_SPECIAL_EXIT_TEMPLATE.to_owned(),
+        parameters: vec![ParameterDefinition::Select(SelectParameterDefinition {
+            base: parameter_base("exitCode", "退出码"),
+            options: vec!["1".to_owned(), "3".to_owned(), "8".to_owned()],
+            default_value: Some("1".to_owned()),
+        })],
+        environment: BTreeMap::new(),
+        outcome_policy: OutcomePolicy::exit_code(
+            1,
+            vec![ExitCodeRange { start: 0, end: 1 }],
+            vec![ExitCodeRange { start: 2, end: 7 }],
+        ),
     }
 }
 
@@ -213,6 +284,8 @@ mod tests {
         builtin_command_definitions, CommandOrigin, RiskLevel, RunnerType, CMD_PARAMETER_ECHO_ID,
         POWERSHELL_PARAMETER_ECHO_ID,
     };
+    #[cfg(feature = "ui-validation")]
+    use crate::execution::outcome::{Outcome, OutcomePolicy};
     use crate::execution::parameter::{validate_parameter_values, ParameterKind, ParameterValue};
     use crate::execution::planner::ExecutionPlanner;
     #[cfg(not(feature = "ui-validation"))]
@@ -277,6 +350,7 @@ mod tests {
             assert_eq!(definition.origin, CommandOrigin::Builtin);
             assert_eq!(definition.risk_level, RiskLevel::Normal);
             assert_eq!(definition.revision, 1);
+            assert_eq!(definition.outcome_policy.version(), 1);
             assert_eq!(
                 definition
                     .parameters
@@ -308,13 +382,13 @@ mod tests {
         assert_eq!(error.code, PlannerErrorCode::CommandBlockNotFound);
     }
 
-    /// 验证显式 feature 只追加一个无参数 PowerShell 短等待，并复用同一 Planner 闭环。
+    /// 验证显式 feature 追加三个安全验证 Definition，并复用同一 Planner 闭环。
     #[cfg(feature = "ui-validation")]
     #[test]
     fn exposes_ui_validation_definition_through_the_same_planner_flow() {
         let definitions = builtin_command_definitions();
         let validation_definition = &definitions[2];
-        assert_eq!(definitions.len(), 3);
+        assert_eq!(definitions.len(), 5);
         assert_eq!(validation_definition.id, UI_VALIDATION_SHORT_WAIT_ID);
         assert_eq!(validation_definition.origin, CommandOrigin::Builtin);
         assert_eq!(validation_definition.runner, RunnerType::WindowsPowerShell);
@@ -327,12 +401,14 @@ mod tests {
         let planner = ExecutionPlanner::new();
         let summaries = planner.list_command_blocks();
 
-        assert_eq!(summaries.len(), 3);
+        assert_eq!(summaries.len(), 5);
         assert_eq!(summaries[0].id, POWERSHELL_PARAMETER_ECHO_ID);
         assert_eq!(summaries[1].id, CMD_PARAMETER_ECHO_ID);
         assert_eq!(summaries[2].id, UI_VALIDATION_SHORT_WAIT_ID);
         assert_eq!(summaries[2].runner, RunnerType::WindowsPowerShell);
         assert_eq!(summaries[2].risk_level, RiskLevel::Normal);
+        assert_eq!(summaries[3].id, "builtin.ui-validation.ordinary-failure");
+        assert_eq!(summaries[4].id, "builtin.ui-validation.special-exit");
 
         let details = planner
             .get_command_block(UI_VALIDATION_SHORT_WAIT_ID)
@@ -356,6 +432,59 @@ mod tests {
                 execution_spec_hash: preview.execution_spec_hash,
             })
             .expect("验证 Definition 应通过同一 Run 复验入口");
+
+        let ordinary_failure = &definitions[3];
+        assert_eq!(ordinary_failure.template, "exit 9");
+        assert_eq!(
+            ordinary_failure.outcome_policy.interpret_exit_code(9),
+            Outcome::Failure
+        );
+        let special_exit = &definitions[4];
+        assert_eq!(special_exit.parameters.len(), 1);
+        assert_eq!(
+            special_exit.outcome_policy.interpret_exit_code(1),
+            Outcome::Success
+        );
+        assert_eq!(
+            special_exit.outcome_policy.interpret_exit_code(3),
+            Outcome::Warning
+        );
+        assert_eq!(
+            special_exit.outcome_policy.interpret_exit_code(8),
+            Outcome::Failure
+        );
+        assert_eq!(
+            special_exit.outcome_policy,
+            OutcomePolicy::exit_code(
+                1,
+                vec![crate::execution::outcome::ExitCodeRange { start: 0, end: 1 },],
+                vec![crate::execution::outcome::ExitCodeRange { start: 2, end: 7 },]
+            )
+        );
+
+        let special_details = planner
+            .get_command_block(&special_exit.id)
+            .expect("特殊 Exit Code Definition 应通过详情入口读取");
+        let special_request = PreviewCommandRequest {
+            command_block_id: special_details.id,
+            expected_revision: special_details.revision,
+            parameter_values: BTreeMap::from([(
+                "exitCode".to_owned(),
+                ParameterValue::Text("3".to_owned()),
+            )]),
+        };
+        let special_preview = planner
+            .preview(&special_request)
+            .expect("特殊 Exit Code Definition 应通过 Preview");
+        assert_eq!(special_preview.preview_text, "exit '3'");
+        planner
+            .verify_run(&VerifyRunRequest {
+                command_block_id: special_request.command_block_id,
+                expected_revision: special_request.expected_revision,
+                parameter_values: special_request.parameter_values,
+                execution_spec_hash: special_preview.execution_spec_hash,
+            })
+            .expect("特殊 Exit Code Definition 应通过同一 Run 复验入口");
     }
 
     /// 验证两个 Built-in 的完整六类值与受限模板都能进入确定的后续语义。

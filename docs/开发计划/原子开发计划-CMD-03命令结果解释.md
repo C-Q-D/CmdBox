@@ -33,7 +33,7 @@ CMD03-POLICY-01 → CMD03-SESSION-01 → CMD03-CONTRACT-01 → CMD03-UI-01 → C
 
 ## CMD03-POLICY-01 建立命令结果策略
 
-- 状态：pending
+- 状态：done
 - 支持的验收场景：普通命令、特殊退出码工具和类型化目标事实都由 Rust 纯规则得到确定 Outcome。
 - 唯一目标：建立可验证、版本化且属于 Command Block Definition 的 `OutcomePolicy` 深模块。
 - 当前行为与目标行为：Canonical Spec 只有硬编码的 policy version；完成后每个 Definition 持有合法 Policy，Planner 使用真实版本绑定 Preview/Run Hash。
@@ -54,9 +54,15 @@ CMD03-POLICY-01 → CMD03-SESSION-01 → CMD03-CONTRACT-01 → CMD03-UI-01 → C
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(core): [CMD03-POLICY-01] 建立命令结果策略`
 
+### 执行记录
+
+- 实际交付：新增稳定 `Outcome`、版本化 Exit Code/Target Results Policy、严格区间校验与保守目标事实聚合；两个正式 Echo 与短等待使用标准策略，`ui-validation` 追加普通 `exit 9` 和可选 `1/3/8` 的特殊策略 Definition；Planner 在任何渲染前校验 Policy，并把 Definition 的真实 version 写入既有 Canonical Spec 字段。
+- 实际验证：先取得 4 项失败红测，再完成 Outcome 5 项、Policy Hash/非法配置、默认 2 个与 feature 5 个 Registry、特殊 Definition Preview/Run 复验；默认和 `ui-validation` 构建均为 Rust 88 passed、1 ignored，format 与全 target/all feature strict Clippy 通过；限定 L2 复核结论为 `PASS`。
+- 计划偏差：真实目标事实仍按修订后的范围留给 CMD-04；本原子只交付不解析 stdout 的类型化聚合接口和纯 Rust 证据。
+
 ## CMD03-SESSION-01 生成执行业务结果
 
-- 状态：pending
+- 状态：in_progress
 - 支持的验收场景：普通与特殊退出码在自然完成后由 Rust 生成 Outcome，取消和内部失败保持 `none`。
 - 唯一目标：让 Session Supervisor 在唯一终态中生成独立于 Lifecycle 的业务结果。
 - 当前行为与目标行为：Session 只保留 Exit Code；完成后私有 `VerifiedExecution` 携带 Policy，自然完成解释 Outcome，其他终态明确为 `none`。
