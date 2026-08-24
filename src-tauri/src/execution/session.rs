@@ -19,6 +19,7 @@ use crate::execution::artifact::ArtifactError;
 use crate::execution::manager::{
     lock_unpoisoned, ActiveExecution, ExecutionControlState, ExecutionId, ExecutionManager,
 };
+use crate::execution::outcome::{Outcome, OutcomePolicy};
 use crate::execution::output::{OutputBatch, OutputCapture};
 use crate::execution::planner::VerifiedExecution;
 use crate::process::windows::managed_process::{
@@ -82,6 +83,8 @@ pub enum ExecutionEvent {
         execution_id: ExecutionId,
         /// Windows PowerShell 原始 Exit Code。
         exit_code: u32,
+        /// Command Block Policy 对原始 Exit Code 的业务解释。
+        outcome: Outcome,
         /// 从 Resume 到终态发布前的后端耗时。
         duration: Duration,
         /// Session 事件消费者过慢造成且尚未随 Output 报告的字节数。
@@ -91,6 +94,8 @@ pub enum ExecutionEvent {
     Cancelled {
         /// 当前 Execution ID。
         execution_id: ExecutionId,
+        /// 取消没有自然完成的业务事实，固定为 `none`。
+        outcome: Outcome,
         /// 从 Resume 到终态发布前的后端耗时。
         duration: Duration,
         /// Session 事件消费者过慢造成且尚未随 Output 报告的字节数。
@@ -102,6 +107,8 @@ pub enum ExecutionEvent {
         execution_id: ExecutionId,
         /// 面向开发者的稳定失败说明。
         message: String,
+        /// Core 内部失败不能冒充命令业务失败，固定为 `none`。
+        outcome: Outcome,
         /// 从 Resume 到终态发布前的后端耗时。
         duration: Duration,
         /// Session 事件消费者过慢造成且尚未随 Output 报告的字节数。
@@ -356,8 +363,8 @@ impl ExecutionManager {
         &self,
         verified: VerifiedExecution,
     ) -> Result<StartedExecution, ExecutionStartError> {
-        let launch = verified
-            .into_process_launch()
+        let (launch, outcome_policy) = verified
+            .into_session_parts()
             .map_err(ExecutionStartError::Artifact)?;
         #[cfg(test)]
         let temporary_directory = launch.temporary_directory().to_path_buf();
@@ -409,13 +416,16 @@ impl ExecutionManager {
             .name(format!("cmdbox-execution-{execution_id}"))
             .spawn(move || {
                 supervise_execution(
-                    execution_id,
                     process,
                     output_worker,
-                    active_state,
-                    supervisor_manager,
-                    supervisor_sink,
-                    resumed_at,
+                    ExecutionSupervisor {
+                        execution_id,
+                        active_state,
+                        manager: supervisor_manager,
+                        sink: supervisor_sink,
+                        resumed_at,
+                        outcome_policy,
+                    },
                 )
             });
         if let Err(error) = supervisor {
@@ -433,6 +443,22 @@ impl ExecutionManager {
     }
 }
 
+/// Supervisor 线程独占的终态解释、Active 清理与事件发布上下文。
+struct ExecutionSupervisor {
+    /// 当前受管 Execution 的稳定身份。
+    execution_id: ExecutionId,
+    /// 取消线程与 Supervisor 共享的控制状态。
+    active_state: Arc<Mutex<ExecutionControlState>>,
+    /// 终态发布后移除 Active 索引的 Manager。
+    manager: ExecutionManager,
+    /// 当前 Session 的唯一事件生产端。
+    sink: EventSink,
+    /// 受管进程完成 Resume 的时间点。
+    resumed_at: Instant,
+    /// Preview/Run Hash 已绑定且由 Definition 校验的结果策略。
+    outcome_policy: OutcomePolicy,
+}
+
 /// 持续把 OutputCapture 的有界 Batch 转入 Session 有界队列，直到两个 Pipe EOF。
 fn forward_output(execution_id: ExecutionId, capture: OutputCapture, sink: EventSink) {
     while let Ok(batch) = capture.receiver().recv() {
@@ -443,14 +469,18 @@ fn forward_output(execution_id: ExecutionId, capture: OutputCapture, sink: Event
 
 /// 等待根进程、关闭 Job 以清理遗留子孙、等待输出 EOF，并发布唯一终态。
 fn supervise_execution(
-    execution_id: ExecutionId,
     process: ManagedProcess,
     output_worker: thread::JoinHandle<()>,
-    active_state: Arc<Mutex<ExecutionControlState>>,
-    manager: ExecutionManager,
-    sink: EventSink,
-    resumed_at: Instant,
+    supervisor: ExecutionSupervisor,
 ) {
+    let ExecutionSupervisor {
+        execution_id,
+        active_state,
+        manager,
+        sink,
+        resumed_at,
+        outcome_policy,
+    } = supervisor;
     let wait_result = process.wait();
     let cleanup_result = process.terminate_job();
     let job_empty_result = process.wait_job_empty();
@@ -468,45 +498,65 @@ fn supervise_execution(
         (Ok(exit_code), Ok(()), Ok(()), Ok(()))
             if cancel_requested && exit_code == CMDBOX_CANCEL_EXIT_CODE =>
         {
-            ExecutionEvent::Cancelled {
-                execution_id,
-                duration,
-                dropped_output_bytes: 0,
-            }
+            cancelled_terminal(execution_id, duration)
         }
-        (Ok(exit_code), Ok(()), Ok(()), Ok(())) => ExecutionEvent::Finished {
+        (Ok(exit_code), Ok(()), Ok(()), Ok(())) => {
+            finished_terminal(execution_id, exit_code, duration, &outcome_policy)
+        }
+        (Err(error), _, _, _) => failed_terminal(execution_id, error.to_string(), duration),
+        (Ok(_), Err(error), _, _) => failed_terminal(execution_id, error.to_string(), duration),
+        (Ok(_), Ok(()), Err(error), _) => {
+            failed_terminal(execution_id, error.to_string(), duration)
+        }
+        (Ok(_), Ok(()), Ok(()), Err(_)) => failed_terminal(
             execution_id,
-            exit_code,
+            "Execution 输出转发线程异常退出".to_owned(),
             duration,
-            dropped_output_bytes: 0,
-        },
-        (Err(error), _, _, _) => ExecutionEvent::Failed {
-            execution_id,
-            message: error.to_string(),
-            duration,
-            dropped_output_bytes: 0,
-        },
-        (Ok(_), Err(error), _, _) => ExecutionEvent::Failed {
-            execution_id,
-            message: error.to_string(),
-            duration,
-            dropped_output_bytes: 0,
-        },
-        (Ok(_), Ok(()), Err(error), _) => ExecutionEvent::Failed {
-            execution_id,
-            message: error.to_string(),
-            duration,
-            dropped_output_bytes: 0,
-        },
-        (Ok(_), Ok(()), Ok(()), Err(_)) => ExecutionEvent::Failed {
-            execution_id,
-            message: "Execution 输出转发线程异常退出".to_owned(),
-            duration,
-            dropped_output_bytes: 0,
-        },
+        ),
     };
     sink.push_terminal(terminal);
     manager.remove(execution_id);
+}
+
+/// 构造自然完成终态，并只用已验证 Policy 解释原始 Exit Code。
+fn finished_terminal(
+    execution_id: ExecutionId,
+    exit_code: u32,
+    duration: Duration,
+    outcome_policy: &OutcomePolicy,
+) -> ExecutionEvent {
+    ExecutionEvent::Finished {
+        execution_id,
+        exit_code,
+        outcome: outcome_policy.interpret_exit_code(exit_code),
+        duration,
+        dropped_output_bytes: 0,
+    }
+}
+
+/// 构造已确认整树终止的取消终态，并固定没有业务 Outcome。
+fn cancelled_terminal(execution_id: ExecutionId, duration: Duration) -> ExecutionEvent {
+    ExecutionEvent::Cancelled {
+        execution_id,
+        outcome: Outcome::None,
+        duration,
+        dropped_output_bytes: 0,
+    }
+}
+
+/// 构造 Core 内部失败终态，并防止其被误解释为命令业务 Failure。
+fn failed_terminal(
+    execution_id: ExecutionId,
+    message: String,
+    duration: Duration,
+) -> ExecutionEvent {
+    ExecutionEvent::Failed {
+        execution_id,
+        message,
+        outcome: Outcome::None,
+        duration,
+        dropped_output_bytes: 0,
+    }
 }
 
 /// 统计 Batch 自身文本和此前已声明丢弃字节，用于跨队列传递丢弃信息。
@@ -529,10 +579,16 @@ mod tests {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
 
-    use super::{ExecutionEvent, ExecutionManager, StartedExecution};
+    use super::{
+        cancelled_terminal, failed_terminal, ExecutionEvent, ExecutionManager, StartedExecution,
+    };
     use crate::execution::manager::ActiveExecutionState;
+    use crate::execution::outcome::{ExitCodeRange, Outcome, OutcomePolicy};
     use crate::execution::output::OutputStream;
-    use crate::execution::planner::{verified_windows_powershell_for_test, VerifiedExecution};
+    use crate::execution::planner::{
+        verified_windows_powershell_for_test, verified_windows_powershell_with_policy_for_test,
+        VerifiedExecution,
+    };
 
     /// 以方法类型证明 Session 唯一启动入口只接受 Planner 授权值。
     #[test]
@@ -542,6 +598,26 @@ mod tests {
             VerifiedExecution,
         ) -> Result<StartedExecution, super::ExecutionStartError> = ExecutionManager::start;
         let _ = boundary;
+    }
+
+    /// 验证取消和 Core 内部失败的集中构造器始终发布 `none`。
+    #[test]
+    fn keeps_cancelled_and_internal_failed_outcomes_none() {
+        let execution_id = uuid::Uuid::new_v4();
+        assert!(matches!(
+            cancelled_terminal(execution_id, Duration::ZERO),
+            ExecutionEvent::Cancelled {
+                outcome: Outcome::None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            failed_terminal(execution_id, "internal".to_owned(), Duration::ZERO),
+            ExecutionEvent::Failed {
+                outcome: Outcome::None,
+                ..
+            }
+        ));
     }
 
     /// 把无害测试脚本包装为仅在测试构建存在的 Planner 授权值。
@@ -629,6 +705,7 @@ mod tests {
             Some(ExecutionEvent::Finished {
                 execution_id: observed,
                 exit_code: 0,
+                outcome: Outcome::Success,
                 ..
             }) if *observed == execution_id
         ));
@@ -661,8 +738,49 @@ mod tests {
         let events = collect_until_terminal(&started);
         assert!(matches!(
             events.last(),
-            Some(ExecutionEvent::Finished { exit_code: 7, .. })
+            Some(ExecutionEvent::Finished {
+                exit_code: 7,
+                outcome: Outcome::Failure,
+                ..
+            })
         ));
+    }
+
+    /// 验证特殊 Policy 经完整受管进程 Supervisor 路径解释真实非零 Exit Code。
+    #[test]
+    fn carries_special_policy_through_real_natural_supervisor_terminal() {
+        let special = OutcomePolicy::exit_code(
+            1,
+            vec![ExitCodeRange { start: 0, end: 1 }],
+            vec![ExitCodeRange { start: 2, end: 7 }],
+        );
+        let scenarios = [
+            (1, Outcome::Success),
+            (3, Outcome::Warning),
+            (8, Outcome::Failure),
+        ];
+
+        for (exit_code, expected_outcome) in scenarios {
+            let manager = ExecutionManager::new();
+            let verified = verified_windows_powershell_with_policy_for_test(
+                &format!("exit {exit_code}"),
+                std::env::temp_dir(),
+                special.clone(),
+            );
+            let started = manager
+                .start(verified)
+                .expect("安全特殊 Exit Code 脚本应启动");
+            let events = collect_until_terminal(&started);
+            assert!(matches!(
+                events.last(),
+                Some(ExecutionEvent::Finished {
+                    exit_code: observed_exit,
+                    outcome,
+                    ..
+                }) if *observed_exit == exit_code && *outcome == expected_outcome
+            ));
+            wait_until_removed(&manager, started.execution_id);
+        }
     }
 
     /// 验证根 PowerShell 自然退出时，Session 会终止仍留在 Job 中的子孙并完成 Pipe EOF。
@@ -723,7 +841,10 @@ mod tests {
         assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
         assert!(matches!(
             events.last(),
-            Some(ExecutionEvent::Cancelled { .. })
+            Some(ExecutionEvent::Cancelled {
+                outcome: Outcome::None,
+                ..
+            })
         ));
         wait_until_removed(&manager, started.execution_id);
         let after_terminal = manager

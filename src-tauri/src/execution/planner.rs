@@ -349,6 +349,8 @@ pub struct VerifiedExecution {
     working_directory: PathBuf,
     /// CMD 完全替换环境中已进入 Hash 的 Definition 与参数绑定；PowerShell 为空。
     environment: BTreeMap<String, OsString>,
+    /// 与 Hash 中 version 相同、已通过 Definition 校验的结果解释策略。
+    outcome_policy: super::outcome::OutcomePolicy,
 }
 
 /// 只输出授权值的非敏感结构摘要，不输出 Runner、工作目录或参数原值。
@@ -368,23 +370,29 @@ impl std::fmt::Debug for VerifiedExecution {
 }
 
 impl VerifiedExecution {
-    /// 在下一原子的 Session 启动边界消费唯一授权值，并创建字段私有的 `ProcessLaunch`。
+    /// 在 Session 启动边界消费唯一授权值，并拆出字段私有的 Launch 与已验证 Policy。
     ///
     /// 只有 `verify_run` 成功后才能调用；本方法会创建受管临时脚本目录并写入已经绑定 Hash
     /// 的完整 Artifact。失败时返回 Artifact 错误且不会启动进程，成功后调用方仍无法修改
-    /// executable、Runner options、工作目录或脚本路径。
-    pub(crate) fn into_process_launch(self) -> Result<ProcessLaunch, ArtifactError> {
+    /// executable、Runner options、工作目录、脚本路径或 Policy。
+    pub(crate) fn into_session_parts(
+        self,
+    ) -> Result<(ProcessLaunch, super::outcome::OutcomePolicy), ArtifactError> {
         let Self {
             rendered_script,
             resolved_runner,
             working_directory,
             environment,
+            outcome_policy,
         } = self;
         let materialized_script = MaterializedScript::create(rendered_script)?;
-        Ok(resolved_runner.process_launch_with_environment(
-            materialized_script,
-            &working_directory,
-            environment,
+        Ok((
+            resolved_runner.process_launch_with_environment(
+                materialized_script,
+                &working_directory,
+                environment,
+            ),
+            outcome_policy,
         ))
     }
 }
@@ -398,12 +406,30 @@ pub(crate) fn verified_windows_powershell_for_test(
     script: &str,
     working_directory: PathBuf,
 ) -> VerifiedExecution {
+    verified_windows_powershell_with_policy_for_test(
+        script,
+        working_directory,
+        super::outcome::OutcomePolicy::standard(),
+    )
+}
+
+/// 为 Session 的特殊结果策略测试构造可注入已校验 Policy 的授权值。
+#[cfg(test)]
+pub(crate) fn verified_windows_powershell_with_policy_for_test(
+    script: &str,
+    working_directory: PathBuf,
+    outcome_policy: super::outcome::OutcomePolicy,
+) -> VerifiedExecution {
+    outcome_policy
+        .validate()
+        .expect("测试专用 Outcome Policy 必须有效");
     VerifiedExecution {
         rendered_script: RenderedScript::windows_powershell(script),
         resolved_runner: WindowsPowerShellRunner::resolve()
             .expect("测试系统应提供 Windows PowerShell"),
         working_directory,
         environment: BTreeMap::new(),
+        outcome_policy,
     }
 }
 
@@ -493,6 +519,7 @@ impl ExecutionPlanner {
             resolved_runner: prepared.resolved_runner,
             working_directory: prepared.working_directory,
             environment: prepared.environment,
+            outcome_policy: prepared.definition.outcome_policy,
         })
     }
 }

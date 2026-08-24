@@ -356,6 +356,7 @@ fn map_event(event: ExecutionEvent, sequence: u64) -> ExecutionStreamEvent {
         ExecutionEvent::Finished {
             execution_id,
             exit_code,
+            outcome: _,
             duration,
             dropped_output_bytes,
         } => ExecutionStreamEvent::Finished {
@@ -367,6 +368,7 @@ fn map_event(event: ExecutionEvent, sequence: u64) -> ExecutionStreamEvent {
         },
         ExecutionEvent::Cancelled {
             execution_id,
+            outcome: _,
             duration,
             dropped_output_bytes,
         } => ExecutionStreamEvent::Cancelled {
@@ -378,6 +380,7 @@ fn map_event(event: ExecutionEvent, sequence: u64) -> ExecutionStreamEvent {
         ExecutionEvent::Failed {
             execution_id,
             message,
+            outcome: _,
             duration,
             dropped_output_bytes,
         } => ExecutionStreamEvent::Failed {
@@ -907,15 +910,41 @@ mod tests {
     /// 验证 PowerShell Built-in 经 Preview、复验、Session 和 IPC Adapter 字面回显六类参数。
     #[test]
     fn runs_typed_powershell_built_in_through_ipc_adapter() {
-        let temporary_root = std::env::temp_dir();
-        fs::create_dir_all(temporary_root.join("CmdBox")).expect("测试前应确保 CmdBox 临时根存在");
-        let current_root = std::env::current_dir().expect("测试当前目录应存在");
-        let temporary_before = direct_directory_entries(&temporary_root);
-        let current_before = direct_directory_entries(&current_root);
+        let target_root = std::env::temp_dir()
+            .join("CmdBox")
+            .join(format!("test-target-{}", uuid::Uuid::new_v4()));
+        let first_target = target_root.join("first target");
+        let second_target = target_root.join("second target");
+        fs::create_dir_all(&first_target).expect("应创建第一测试目标目录");
+        fs::create_dir(&second_target).expect("应创建第二测试目标目录");
         let planner = ExecutionPlanner::new();
 
         for enabled in [true, false] {
-            let (preview, run_request) = preview_and_run_request(&planner, enabled);
+            let mut values = valid_values(enabled);
+            values.insert(
+                "folder".to_owned(),
+                ParameterValue::Text(first_target.to_string_lossy().into_owned()),
+            );
+            values.insert(
+                "folders".to_owned(),
+                ParameterValue::Array(vec![
+                    ParameterValue::Text(first_target.to_string_lossy().into_owned()),
+                    ParameterValue::Text(second_target.to_string_lossy().into_owned()),
+                ]),
+            );
+            let preview = planner
+                .preview(&PreviewCommandRequest {
+                    command_block_id: POWERSHELL_PARAMETER_ECHO_ID.to_owned(),
+                    expected_revision: 1,
+                    parameter_values: values.clone(),
+                })
+                .expect("PowerShell Preview 应成功");
+            let run_request = VerifyRunRequest {
+                command_block_id: POWERSHELL_PARAMETER_ECHO_ID.to_owned(),
+                expected_revision: preview.revision,
+                parameter_values: values,
+                execution_spec_hash: preview.execution_spec_hash.clone(),
+            };
             let manager = ExecutionManager::new();
             let channel_events = Arc::new(Mutex::new(Vec::<ExecutionStreamEvent>::new()));
             let observed = Arc::clone(&channel_events);
@@ -1001,8 +1030,12 @@ mod tests {
             assert!(manager.active_snapshot().is_empty());
         }
 
-        assert_eq!(temporary_before, direct_directory_entries(&temporary_root));
-        assert_eq!(current_before, direct_directory_entries(&current_root));
+        assert!(direct_directory_entries(&first_target).is_empty());
+        assert!(direct_directory_entries(&second_target).is_empty());
+        fs::remove_dir(&first_target).expect("第一测试目标应保持为空并可清理");
+        fs::remove_dir(&second_target).expect("第二测试目标应保持为空并可清理");
+        fs::remove_dir(&target_root).expect("测试目标根应保持为空并可清理");
+        assert!(!target_root.exists(), "测试结束不得遗留目标目录");
     }
 
     /// 验证 CMD Built-in 经相同 Preview、复验、Session 和 IPC 接口安全回显全部边界字符。

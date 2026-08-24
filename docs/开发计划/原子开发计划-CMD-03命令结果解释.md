@@ -62,7 +62,7 @@ CMD03-POLICY-01 → CMD03-SESSION-01 → CMD03-CONTRACT-01 → CMD03-UI-01 → C
 
 ## CMD03-SESSION-01 生成执行业务结果
 
-- 状态：in_progress
+- 状态：done
 - 支持的验收场景：普通与特殊退出码在自然完成后由 Rust 生成 Outcome，取消和内部失败保持 `none`。
 - 唯一目标：让 Session Supervisor 在唯一终态中生成独立于 Lifecycle 的业务结果。
 - 当前行为与目标行为：Session 只保留 Exit Code；完成后私有 `VerifiedExecution` 携带 Policy，自然完成解释 Outcome，其他终态明确为 `none`。
@@ -83,9 +83,15 @@ CMD03-POLICY-01 → CMD03-SESSION-01 → CMD03-CONTRACT-01 → CMD03-UI-01 → C
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(core): [CMD03-SESSION-01] 生成执行业务结果`
 
+### 执行记录
+
+- 实际交付：`VerifiedExecution` 私有携带 Hash 已绑定且校验通过的 Policy，Session 启动时拆为不可修改的 Launch/Policy；Supervisor 仅在 wait、Job 清理、Job empty 和 Output join 全部成功后生成 Finished Outcome。原始 `u32` Exit Code 完整保留；取消与 Core 内部失败集中构造为 `none`；IPC 在本原子显式忽略内部字段，公开 wire 留待下一原子一次性升级。
+- 实际验证：字段红测先证明既有终态缺少 Outcome；真实标准 `exit 0/7`、真实特殊 `exit 1/3/8`、真实短等待 Cancel、自然根退出/子孙清理、取消竞态、慢消费者和内部终态构造测试通过。全 feature 为 90 passed、1 ignored，Windows Core 强退集成 1 passed，format 与 strict Clippy 通过；第 1 轮 L3 复核要求补齐特殊 Policy 的真实 Supervisor 路径，修订后第 2 轮为 `PASS`。
+- 计划偏差：为让并行真实 PowerShell 测试不受系统 Temp 中其他进程临时文件干扰，把既有 IPC 回显测试从“比较整个系统 Temp”收窄为两个 UUID 专用空目录的精确不变与清理断言，用户可观察行为未改变。
+
 ## CMD03-CONTRACT-01 发布稳定 Outcome 契约
 
-- 状态：pending
+- 状态：in_progress
 - 支持的验收场景：前端经现有 Run Channel 收到 Rust 生成的稳定 Outcome，不增加任意执行入口。
 - 唯一目标：把内部 Outcome 精确发布为 Rust 单一真值生成的 TypeScript Contract。
 - 当前行为与目标行为：公开三种终态没有 Outcome；完成后 `Finished`、`Cancelled`、`Failed` 均有必填 Outcome。

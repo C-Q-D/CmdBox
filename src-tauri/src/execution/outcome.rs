@@ -38,9 +38,9 @@ pub(crate) enum TargetOutcomeFact {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ExitCodeRange {
     /// 区间包含的最小 Exit Code。
-    pub(crate) start: i32,
+    pub(crate) start: u32,
     /// 区间包含的最大 Exit Code。
-    pub(crate) end: i32,
+    pub(crate) end: u32,
 }
 
 /// 当前 Windows MVP 支持的结果事实来源。
@@ -136,8 +136,7 @@ impl OutcomePolicy {
     }
 
     /// 只按 Policy 解释自然完成的原始 Exit Code。
-    #[allow(dead_code)]
-    pub(crate) fn interpret_exit_code(&self, exit_code: i32) -> Outcome {
+    pub(crate) fn interpret_exit_code(&self, exit_code: u32) -> Outcome {
         let OutcomePolicyKind::ExitCode { success, warning } = &self.kind else {
             return Outcome::None;
         };
@@ -172,8 +171,7 @@ impl OutcomePolicy {
 
 impl ExitCodeRange {
     /// 判断一个 Exit Code 是否落在包含端点的区间内。
-    #[allow(dead_code)]
-    const fn contains(self, exit_code: i32) -> bool {
+    const fn contains(self, exit_code: u32) -> bool {
         self.start <= exit_code && exit_code <= self.end
     }
 }
@@ -216,7 +214,7 @@ mod tests {
         assert_eq!(policy.validate(), Ok(()));
         assert_eq!(policy.interpret_exit_code(0), Outcome::Success);
         assert_eq!(policy.interpret_exit_code(1), Outcome::Failure);
-        assert_eq!(policy.interpret_exit_code(-1), Outcome::Failure);
+        assert_eq!(policy.interpret_exit_code(u32::MAX), Outcome::Failure);
     }
 
     /// 验证特殊工具可以显式声明非零成功与警告区间。
