@@ -1106,8 +1106,26 @@ button {
 }
 
 .execution-result--cancelled,
-.execution-result--failed {
+.execution-result--failed,
+.execution-result--outcome-warning,
+.execution-result--outcome-partialFailure,
+.execution-result--outcome-failure {
   border-color: rgba(161, 72, 41, 0.42);
+}
+
+.execution-result__outcome {
+  color: var(--ink-muted);
+  font-weight: 600;
+}
+
+.execution-result__outcome--success {
+  color: var(--signal-strong);
+}
+
+.execution-result__outcome--warning,
+.execution-result__outcome--partialFailure,
+.execution-result__outcome--failure {
+  color: var(--signal-interesting);
 }
 
 .execution-result dl {

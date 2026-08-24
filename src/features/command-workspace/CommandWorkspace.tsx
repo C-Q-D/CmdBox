@@ -31,6 +31,7 @@ import {
   type CommandBlockSummary,
   type CommandExecutionGateway,
   type ExecutionStreamEvent,
+  type Outcome,
   type PreviewCommandResponse,
 } from "./execution-gateway";
 import {
@@ -91,6 +92,8 @@ type WorkspacePhase =
 interface ExecutionResult {
   /** Rust Core 发布的终态类型。 */
   kind: "finished" | "cancelled" | "failed";
+  /** Rust Core 按 Command Block Policy 发布的稳定业务结果。 */
+  outcome: Outcome;
   /** 自然结束时存在的原始 Exit Code。 */
   exitCode?: number;
   /** Rust Core 记录的执行耗时。 */
@@ -100,6 +103,15 @@ interface ExecutionResult {
   /** Session 终态仍未随 Output 报告的丢弃字节数。 */
   droppedOutputBytes: number;
 }
+
+/** 后端 Outcome 枚举到固定用户文案的穷尽映射，不包含任何结果推断。 */
+const OUTCOME_LABELS: Readonly<Record<Outcome, string>> = {
+  none: "未生成",
+  success: "成功",
+  warning: "警告",
+  partialFailure: "部分失败",
+  failure: "失败",
+};
 
 /** 已接受并带独立 generation 的当前 Definition。 */
 interface LoadedDefinition {
@@ -741,6 +753,7 @@ export function CommandWorkspace({
       case "finished":
         acceptExecutionTerminal({
           kind: "finished",
+          outcome: event.data.outcome,
           exitCode: event.data.exitCode,
           durationMs: event.data.durationMs,
           droppedOutputBytes: event.data.droppedOutputBytes,
@@ -749,6 +762,7 @@ export function CommandWorkspace({
       case "cancelled":
         acceptExecutionTerminal({
           kind: "cancelled",
+          outcome: event.data.outcome,
           durationMs: event.data.durationMs,
           droppedOutputBytes: event.data.droppedOutputBytes,
         });
@@ -756,6 +770,7 @@ export function CommandWorkspace({
       case "failed":
         acceptExecutionTerminal({
           kind: "failed",
+          outcome: event.data.outcome,
           message: event.data.message,
           durationMs: event.data.durationMs,
           droppedOutputBytes: event.data.droppedOutputBytes,
@@ -1136,7 +1151,45 @@ export function CommandWorkspace({
                   {output.chunks.length === 0 ? <li className="output-empty">尚无输出。启动后由 Rust Channel 推送纯文本 Batch。</li> : null}
                 </ol>
                 {error ? <div className="execution-error" role="alert"><strong>{error.code}</strong><p>{error.message}</p></div> : null}
-                {result ? <div className={`execution-result execution-result--${result.kind}`} role="status"><strong>{result.kind === "finished" ? "任务自然结束" : result.kind === "cancelled" ? "任务已取消" : "任务内部失败"}</strong><dl><div><dt>耗时</dt><dd>{result.durationMs} ms</dd></div>{result.exitCode !== undefined ? <div><dt>Exit Code</dt><dd>{result.exitCode}</dd></div> : null}<div><dt>终态丢弃</dt><dd>{result.droppedOutputBytes} bytes</dd></div></dl>{result.message ? <p>{result.message}</p> : null}</div> : null}
+                {result ? (
+                  <div
+                    className={`execution-result execution-result--${result.kind} execution-result--outcome-${result.outcome}`}
+                    role="status"
+                  >
+                    <strong>
+                      {result.kind === "finished"
+                        ? "任务自然结束"
+                        : result.kind === "cancelled"
+                          ? "任务已取消"
+                          : "任务内部失败"}
+                    </strong>
+                    <dl>
+                      <div>
+                        <dt>Outcome</dt>
+                        <dd
+                          className={`execution-result__outcome execution-result__outcome--${result.outcome}`}
+                        >
+                          {OUTCOME_LABELS[result.outcome]}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>耗时</dt>
+                        <dd>{result.durationMs} ms</dd>
+                      </div>
+                      {result.exitCode !== undefined ? (
+                        <div>
+                          <dt>Exit Code</dt>
+                          <dd>{result.exitCode}</dd>
+                        </div>
+                      ) : null}
+                      <div>
+                        <dt>终态丢弃</dt>
+                        <dd>{result.droppedOutputBytes} bytes</dd>
+                      </div>
+                    </dl>
+                    {result.message ? <p>{result.message}</p> : null}
+                  </div>
+                ) : null}
               </section>
             </div>
 

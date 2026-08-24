@@ -8,6 +8,7 @@ import type {
   CommandBlockSummary,
   CommandExecutionGateway,
   ExecutionStreamEvent,
+  Outcome,
   PreviewCommandRequest,
   PreviewCommandResponse,
   VerifyRunRequest,
@@ -1295,9 +1296,44 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
     expect(screen.getByText("7", { selector: "dd" })).toBeDefined();
     expect(screen.queryByText("终态后输出不得显示")).toBeNull();
     expect(screen.queryByText("任务内部失败")).toBeNull();
-    expect(screen.queryByText(/Outcome/)).toBeNull();
+    expect(screen.getByText("Outcome")).toBeDefined();
+    expect(rendered.container.querySelector(".execution-result__outcome")?.textContent).toBe("失败");
     expect(screen.getByRole("button", { name: "重新生成 Preview" })).toBeDefined();
     expect(screen.queryByRole("button", { name: "执行当前命令" })).toBeNull();
+  });
+
+  it.each(
+    [
+      ["none", "未生成"],
+      ["success", "成功"],
+      ["warning", "警告"],
+      ["partialFailure", "部分失败"],
+      ["failure", "失败"],
+    ] satisfies ReadonlyArray<readonly [Outcome, string]>,
+  )("完全按后端 Outcome %s 展示 %s，不按同一个非零 Exit Code 推断", async function renderOutcome(outcome, label) {
+    const fixture = createCommandGatewayFixture();
+    const rendered = renderConnectedWorkspace(fixture);
+
+    await startConfirmedExecution();
+    await waitFor(() => expect(screen.getByText(fixture.executionId)).toBeDefined());
+    await act(async () => {
+      fixture.emit({ event: "started", data: { executionId: fixture.executionId, sequence: 0 } });
+      fixture.emit({
+        event: "finished",
+        data: {
+          executionId: fixture.executionId,
+          sequence: 1,
+          exitCode: 7,
+          outcome,
+          durationMs: 20,
+          droppedOutputBytes: 0,
+        },
+      });
+    });
+
+    expect(rendered.container.querySelector(".execution-result__outcome")?.textContent).toBe(label);
+    expect(screen.getByText("任务自然结束")).toBeDefined();
+    expect(screen.getByText("7", { selector: "dd" })).toBeDefined();
   });
 
   it("只在启动响应锁定 Execution ID 后重放匹配事件", async function lockResponseExecutionId() {
@@ -1467,8 +1503,36 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
       });
     });
     expect(screen.getByText("任务已取消")).toBeDefined();
+    expect(screen.getByText("未生成", { selector: ".execution-result__outcome" })).toBeDefined();
+    expect(screen.queryByText("Exit Code")).toBeNull();
     expect(screen.getByRole("button", { name: "重新生成 Preview" })).toBeDefined();
     expect(screen.queryByRole("button", { name: "执行当前命令" })).toBeNull();
+  });
+
+  it("内部失败保持独立 Lifecycle、未生成 Outcome 且不伪造 Exit Code", async function renderInternalFailure() {
+    const fixture = createCommandGatewayFixture();
+    renderConnectedWorkspace(fixture);
+
+    await startConfirmedExecution();
+    await waitFor(() => expect(screen.getByText(fixture.executionId)).toBeDefined());
+    await act(async () => {
+      fixture.emit({ event: "started", data: { executionId: fixture.executionId, sequence: 0 } });
+      fixture.emit({
+        event: "failed",
+        data: {
+          executionId: fixture.executionId,
+          sequence: 1,
+          message: "执行基础设施未能完成收尾。",
+          outcome: "none",
+          durationMs: 60,
+          droppedOutputBytes: 0,
+        },
+      });
+    });
+
+    expect(screen.getByText("任务内部失败")).toBeDefined();
+    expect(screen.getByText("未生成", { selector: ".execution-result__outcome" })).toBeDefined();
+    expect(screen.queryByText("Exit Code")).toBeNull();
   });
 
   it("Starting 获得响应 ID 后双击只取消一次且 Started 不倒退 Cancelling", async function cancelDuringStarting() {
@@ -1692,6 +1756,7 @@ describe("CmdBox Command Workspace", function describeWorkspace() {
 
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByText("任务已取消")).toBeNull();
+    expect(screen.queryByText("未生成", { selector: ".execution-result__outcome" })).toBeNull();
     expect(screen.getAllByText("正在建立执行").length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "终止任务" })).toBeDefined();
   });

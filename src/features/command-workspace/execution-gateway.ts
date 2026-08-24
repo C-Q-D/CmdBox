@@ -25,6 +25,7 @@ export type {
   CommandBlockDetails,
   CommandBlockSummary,
   ExecutionStreamEvent,
+  Outcome,
   PreviewCommandRequest,
   PreviewCommandResponse,
   RunCommandResponse,

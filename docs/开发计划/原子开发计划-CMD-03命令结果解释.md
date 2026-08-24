@@ -120,7 +120,7 @@ CMD03-POLICY-01 → CMD03-SESSION-01 → CMD03-CONTRACT-01 → CMD03-UI-01 → C
 
 ## CMD03-UI-01 分离展示生命周期与结果
 
-- 状态：in_progress
+- 状态：done
 - 支持的验收场景：用户能在现有结果卡中分别辨认自然结束/取消/内部失败与业务 Outcome。
 - 唯一目标：让 Workspace 只展示后端 Outcome，并保持既有 `editorial-field-notes` 视觉语法。
 - 当前行为与目标行为：结果卡只显示 Lifecycle 式标题；完成后增加固定 Outcome 标签，同时保留 Exit Code、耗时和丢弃字节。
@@ -141,9 +141,15 @@ CMD03-POLICY-01 → CMD03-SESSION-01 → CMD03-CONTRACT-01 → CMD03-UI-01 → C
 - DDD 门禁：提交前一轮限定范围复核必须 `PASS`。
 - 计划提交信息：`feat(ui): [CMD03-UI-01] 分离展示生命周期与结果`
 
+### 执行记录
+
+- 实际交付：Workspace 直接保存三种后端终态携带的 `Outcome`，并在既有结果卡内以穷尽固定映射展示“未生成/成功/警告/部分失败/失败”；Lifecycle 标题、原始 Exit Code、耗时与丢弃字节保持独立。Cancel 与 Core 内部 Failed 只显示 `none` 且不伪造 Exit Code；未增加 IPC、请求字段、页面结构或业务判断分支。
+- 实际验证：先由 TypeScript 红测证明 Gateway 尚未公开 Outcome，再以同一个非零 Exit Code 表驱动锁定五种后端 Outcome 文案；Cancel none、Failed none、新运行清空旧结果、旧 generation/Execution ID/sequence、重复终态与不可信文本回归均通过。前端 7 个文件 97 项测试、typecheck、Vite 158 模块生产构建和 Contract drift 通过；限定 L2 隔离复核结论为 `PASS`。
+- 计划偏差：当前会话没有浏览器 Skill 要求的控制接口，因此未把浏览器视觉检查冒充为已完成；真实 Tauri 可观察证据按计划由宿主原子取得。
+
 ## CMD03-HOST-01 完成结果解释宿主闭环
 
-- 状态：pending
+- 状态：in_progress
 - 支持的验收场景：真实 Windows/Tauri 中普通成功、普通失败、特殊成功/警告/失败和取消均得到准确稳定展示。
 - 唯一目标：完成修订后 CMD-03 的真实宿主、安全、文档和发布门禁。
 - 当前行为与目标行为：自动测试尚未证明真实 WebView/IPC/Rust Process 全链路；完成后安全验证 Definition 逐条取得预期与实际证据，默认 Registry 恢复为两个正式 Built-in。
