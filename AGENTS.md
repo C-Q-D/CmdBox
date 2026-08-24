@@ -33,8 +33,8 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 - 日常小步验证：`pnpm check:fast`；提交前完整验证：`pnpm check`；完整 `pnpm tauri build` 只用于里程碑或发布。
 - `src/` 修改走 Vite HMR，`src-tauri/src/` 修改走 Tauri Watch + Cargo Incremental；不要为普通源码修改手工重建 Bundle。
 - 开发命令、依赖指纹、日志、故障处理和实测耗时统一见[开发环境与日常开发](docs/development/开发环境与日常开发.md)。
-- `CMD-01` 固定无破坏任务闭环与 `CMD-02` 类型化预览和执行均已实现并实测。`CMD-02` 的 9/9 个原子已经完成：默认应用提供两个无破坏回显 Built-in，统一 Command Workspace 已接通六类 Typed Parameter、可信 `executionSpecHash`、一次性 Run 授权、per-run Channel、Output、Cancel 与唯一终态；91 项前端测试、PowerShell/CMD 真实回显、显式短等待 Cancel、三档响应式和无危险命令验收均通过。
-- `CMD-02` 当前只表达 Execution Lifecycle、原始 Exit Code、耗时与有界实时 Output；Outcome、持久日志、虚拟化 Viewer、History、持久化和永久删除仍未实现。前端实时 Output 当前使用 512 KiB、2048 个非空 Chunk 的有界直接渲染。
+- `CMD-01` 至 `CMD-03` 均已实现并实测：默认应用提供两个无破坏回显 Built-in；统一 Command Workspace 已接通六类 Typed Parameter、可信 `executionSpecHash`、一次性 Run、Output、Cancel、唯一 Lifecycle 终态和 Rust Core 生成的业务 Outcome。
+- `OutcomePolicy` 属于 Command Block Definition 并由 Policy version 绑定 Canonical Spec；普通与特殊 Exit Code、Cancel 已通过自动及真实 Tauri 安全验证，内部失败已通过自动回归验证。目标级事实、真实 `partialFailure`、持久日志、虚拟化 Viewer、History、持久化和永久删除仍未实现。前端实时 Output 当前使用 512 KiB、2048 个非空 Chunk 的有界直接渲染。
 
 ## 不得破坏的全局约束
 
@@ -79,13 +79,13 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 | 已完成计划 | [开发环境与项目骨架原子计划](docs/开发计划/原子开发计划-开发环境与项目骨架.md) | 已验证的开发环境、Docker 和 Windows 主机入口准备记录 |
 | 已完成计划 | [Command Workspace 前端视觉原型计划](docs/开发计划/原子开发计划-Command-Workspace前端视觉原型.md) | 已验证的无副作用 React 原型、交互与视觉 QA 记录 |
 | 已完成计划 | [CMD-02 类型化预览与执行原子计划](docs/开发计划/原子开发计划-CMD-02类型化预览与执行.md) | 已验证的六类参数、可信 Preview、PowerShell/CMD 与统一宿主执行闭环记录 |
-| 活动原子计划 | [CMD-03 命令结果解释原子计划](docs/开发计划/原子开发计划-CMD-03命令结果解释.md) | 版本化 Outcome Policy、终态解释、Typed IPC、Workspace 展示与安全宿主验收 |
+| 已完成计划 | [CMD-03 命令结果解释原子计划](docs/开发计划/原子开发计划-CMD-03命令结果解释.md) | 已验证的版本化 Outcome Policy、终态契约、Workspace 展示与安全宿主闭环 |
 | 验收 | [测试与验收](docs/testing/测试与验收.md) | 实现及发布必须取得的验证证据 |
 
 ## 实现与文档同步
 
 - 用户授权实现后，从活动计划中选择依赖已满足的推荐单元，不按前端、Rust、数据库横向拆成无法验收的半成品。
-- `CMD-01` 与 `CMD-02` 已完成；用户已授权连续完成 `CMD-03`，当前以 `ATOMIC-CMD-03-001` 为唯一活动原子计划。真实命令测试只允许回显、受控 Exit Code 和最多约 5 秒短等待；完成后停止在 `CMD-04` 之前，不进入永久删除或持久化。
+- `CMD-01` 至 `CMD-03` 已完成；当前没有进行中的代码单元。下一推荐为 `CMD-04`，必须等待用户检查并明确授权后再规划或实现永久删除。
 - 每个交付单元进入实现前，先规划最终用户流程和可观察结果。
 - 实际实现、自动测试和真实宿主验证完成后，更新测试证据、项目工作台、阶段记录和计划单元状态。
 - GitHub 公开仓库为 `https://github.com/C-Q-D/CmdBox`；每次完成有效改动并形成独立提交后，立即推送当前分支到对应远端跟踪分支。推送前必须完成适用验证并检查本次改动不含凭据或私有数据。
@@ -98,6 +98,5 @@ CmdBox 是一个 Windows First 的桌面工具，把常用的一次性 CLI 命�
 | 计划 ID | 类型 | 文档 |
 |---|---|---|
 | SCOPE-CMDBOX-001 | 产品拆分 | [CmdBox MVP 产品拆分](docs/开发计划/产品拆分-CmdBox-MVP.md) |
-| ATOMIC-CMD-03-001 | 原子开发 | [CMD-03 命令结果解释](docs/开发计划/原子开发计划-CMD-03命令结果解释.md) |
 
 <!-- codex-plan-index:end -->

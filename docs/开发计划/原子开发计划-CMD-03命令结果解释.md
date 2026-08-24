@@ -4,8 +4,8 @@
 
 - 计划 ID：ATOMIC-CMD-03-001
 - 类型：atomic-development
-- 修订版本：1
-- 状态：active
+- 修订版本：2
+- 状态：completed
 - 父级 ID：CMD-03
 - 创建基线：0f58e09
 
@@ -149,7 +149,7 @@ CMD03-POLICY-01 → CMD03-SESSION-01 → CMD03-CONTRACT-01 → CMD03-UI-01 → C
 
 ## CMD03-HOST-01 完成结果解释宿主闭环
 
-- 状态：in_progress
+- 状态：done
 - 支持的验收场景：真实 Windows/Tauri 中普通成功、普通失败、特殊成功/警告/失败和取消均得到准确稳定展示。
 - 唯一目标：完成修订后 CMD-03 的真实宿主、安全、文档和发布门禁。
 - 当前行为与目标行为：自动测试尚未证明真实 WebView/IPC/Rust Process 全链路；完成后安全验证 Definition 逐条取得预期与实际证据，默认 Registry 恢复为两个正式 Built-in。
@@ -169,3 +169,10 @@ CMD03-POLICY-01 → CMD03-SESSION-01 → CMD03-CONTRACT-01 → CMD03-UI-01 → C
 - 风险等级：L3
 - DDD 门禁：提交前最终完整 diff 复核必须 `PASS`。
 - 计划提交信息：`feat(outcome): [CMD03-HOST-01] 完成结果解释宿主闭环`
+
+### 执行记录
+
+- 实际交付：新增 feature-only IPC Adapter 安全矩阵，真实启动普通 `exit 9` 与特殊 `exit 1/3/8` PowerShell 进程，逐项验证 Preview、Hash 复验、唯一 Started/Finished、原始 Exit Code、Outcome 和 Active 清理；默认两个 Echo 的 IPC 回归同时显式锁定 `success`。显式 `ui-validation` Tauri 构建完成五项用户可见验收，随后停止验证进程并恢复默认双 Built-in 契约。
+- 实际验证：用户在真实 CmdBox Tauri 窗口确认普通 `9 → 失败`、特殊 `1 → 成功`、`3 → 警告`、`8 → 失败`，四项均为“任务自然结束”并显示原始 Exit Code；短等待 Cancel 显示“任务已取消”、Outcome“未生成”且无 Exit Code。默认完整门禁为前端 7 文件 97 项、Rust 91 passed/1 ignored、Windows 集成 1 passed；feature 构建新增安全矩阵后为 Rust 92 passed/1 ignored、Windows 集成 1 passed，Contract drift、format、Vite 158 模块生产构建和 all-target strict Clippy 均通过。
+- 安全与限制：全部真实命令仅为既有回显、`exit 1/3/8/9` 和最多 5 秒等待；未执行删除、覆盖、移动、安装、网络、注册表或系统配置操作。当前会话未取得独立 WebView console attachment，不将其冒充为 console=0；目标级真实 Outcome 仍归 CMD-04。
+- 计划偏差：无产品范围偏差；因桌面自动控制接口不可用，五项可见矩阵由用户在已启动的真实验证窗口逐项确认，自动 IPC 矩阵独立证明相同 Definition 的底层精确终态和清理。

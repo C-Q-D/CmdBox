@@ -452,6 +452,10 @@ mod tests {
     };
     use crate::execution::artifact::{ArtifactError, ArtifactOperation};
     use crate::execution::command::{CMD_PARAMETER_ECHO_ID, POWERSHELL_PARAMETER_ECHO_ID};
+    #[cfg(feature = "ui-validation")]
+    use crate::execution::command::{
+        UI_VALIDATION_ORDINARY_FAILURE_ID, UI_VALIDATION_SPECIAL_EXIT_ID,
+    };
     use crate::execution::manager::ExecutionManager;
     use crate::execution::outcome::Outcome;
     use crate::execution::output::{OutputBatch, OutputFragment, OutputStream};
@@ -997,7 +1001,11 @@ mod tests {
             );
             assert!(matches!(
                 events.last(),
-                Some(ExecutionStreamEvent::Finished { exit_code: 0, .. })
+                Some(ExecutionStreamEvent::Finished {
+                    exit_code: 0,
+                    outcome: Outcome::Success,
+                    ..
+                })
             ));
             std::thread::sleep(Duration::from_millis(20));
             assert_eq!(
@@ -1112,6 +1120,89 @@ mod tests {
         }
     }
 
+    /// 验证 feature-only 安全退出码 Definition 经完整 IPC Adapter 发布准确 Outcome。
+    #[cfg(feature = "ui-validation")]
+    #[test]
+    fn runs_safe_outcome_matrix_through_ipc_adapter() {
+        let planner = ExecutionPlanner::new();
+        let cases = [
+            (
+                UI_VALIDATION_ORDINARY_FAILURE_ID,
+                BTreeMap::new(),
+                9,
+                Outcome::Failure,
+            ),
+            (
+                UI_VALIDATION_SPECIAL_EXIT_ID,
+                BTreeMap::from([("exitCode".to_owned(), ParameterValue::Text("1".to_owned()))]),
+                1,
+                Outcome::Success,
+            ),
+            (
+                UI_VALIDATION_SPECIAL_EXIT_ID,
+                BTreeMap::from([("exitCode".to_owned(), ParameterValue::Text("3".to_owned()))]),
+                3,
+                Outcome::Warning,
+            ),
+            (
+                UI_VALIDATION_SPECIAL_EXIT_ID,
+                BTreeMap::from([("exitCode".to_owned(), ParameterValue::Text("8".to_owned()))]),
+                8,
+                Outcome::Failure,
+            ),
+        ];
+
+        for (command_block_id, parameter_values, expected_exit_code, expected_outcome) in cases {
+            let preview = planner
+                .preview(&PreviewCommandRequest {
+                    command_block_id: command_block_id.to_owned(),
+                    expected_revision: 1,
+                    parameter_values: parameter_values.clone(),
+                })
+                .expect("安全 Outcome 验证命令应可 Preview");
+            let request = VerifyRunRequest {
+                command_block_id: command_block_id.to_owned(),
+                expected_revision: preview.revision,
+                parameter_values,
+                execution_spec_hash: preview.execution_spec_hash,
+            };
+            let manager = ExecutionManager::new();
+            let channel_events = Arc::new(Mutex::new(Vec::<ExecutionStreamEvent>::new()));
+            let observed = Arc::clone(&channel_events);
+            let response = run_with_sender(&planner, manager.clone(), &request, move |event| {
+                observed.lock().expect("事件锁不应中毒").push(event);
+                Ok(())
+            })
+            .expect("安全 Outcome 验证命令应可启动");
+
+            let events = wait_for_terminal(&channel_events);
+            assert!(matches!(
+                events.first(),
+                Some(ExecutionStreamEvent::Started { sequence: 0, .. })
+            ));
+            assert!(events
+                .iter()
+                .all(|event| ipc_execution_id(event) == response.execution_id));
+            assert_eq!(
+                events.iter().filter(|event| is_ipc_terminal(event)).count(),
+                1
+            );
+            assert!(matches!(
+                events.last(),
+                Some(ExecutionStreamEvent::Finished {
+                    exit_code,
+                    outcome,
+                    ..
+                }) if *exit_code == expected_exit_code && *outcome == expected_outcome
+            ));
+            let removal_deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < removal_deadline && !manager.active_snapshot().is_empty() {
+                std::thread::yield_now();
+            }
+            assert!(manager.active_snapshot().is_empty());
+        }
+    }
+
     /// 验证 CMD Built-in 经相同 Preview、复验、Session 和 IPC 接口安全回显全部边界字符。
     #[test]
     fn runs_typed_cmd_built_in_through_ipc_adapter() {
@@ -1168,7 +1259,11 @@ mod tests {
             ));
             assert!(matches!(
                 events.last(),
-                Some(ExecutionStreamEvent::Finished { exit_code: 0, .. })
+                Some(ExecutionStreamEvent::Finished {
+                    exit_code: 0,
+                    outcome: Outcome::Success,
+                    ..
+                })
             ));
             assert_eq!(
                 events.iter().filter(|event| is_ipc_terminal(event)).count(),
